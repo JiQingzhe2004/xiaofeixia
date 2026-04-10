@@ -1,0 +1,31 @@
+# 依赖
+node_modules/
+
+# 构建与打包输出
+dist/
+out/
+build/
+release/
+
+# 日志与缓存
+logs/
+*.log
+.npm/
+.cache/
+
+# 环境变量与密钥（勿提交）
+.env
+.env.*
+!.env.example
+
+# 编辑器与系统目录/文件
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Electron / 工具临时文件
+*.asar
+package-lock.json
+docs/desktop-rewrite-api.md
