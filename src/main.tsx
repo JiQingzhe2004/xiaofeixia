@@ -10,8 +10,9 @@ import "@fontsource/roboto/300.css";
 import "@fontsource/roboto/400.css";
 import "@fontsource/roboto/500.css";
 import "@fontsource/roboto/700.css";
-import App from "./App.jsx";
-import { TitleBarSync } from "./windowChrome.jsx";
+import App from "./App";
+import { TitleBarSync } from "./components/windowChrome";
+import { NoticeProvider } from "./components/notice/NoticeCenter";
 
 function Root() {
   const prefersDark = useMediaQuery("(prefers-color-scheme: dark)");
@@ -26,13 +27,15 @@ function Root() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline enableColorScheme />
-      <TitleBarSync />
-      <App />
+      <NoticeProvider>
+        <TitleBarSync />
+        <App />
+      </NoticeProvider>
     </ThemeProvider>
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(
+ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <Root />
   </React.StrictMode>

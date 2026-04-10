@@ -3,7 +3,7 @@ import { useTheme, Box, Typography } from "@mui/material";
 
 export const TITLEBAR_HEIGHT = 40;
 
-/** Windows / Linux：按 MUI 明暗主题同步 titleBarOverlay 的 symbolColor（见官方文档） */
+/** Windows / Linux：按 MUI 明暗主题同步 titleBarOverlay 的 symbolColor */
 export function TitleBarSync() {
   const theme = useTheme();
 
@@ -22,7 +22,7 @@ export function TitleBarSync() {
 }
 
 /**
- * 教程中的可拖拽区域：app-region: drag（Chromium 中常用 -webkit-app-region）
+ * 可拖拽标题栏区域
  * https://www.electronjs.org/zh/docs/latest/tutorial/custom-title-bar
  */
 export function WindowDragRegion() {
@@ -42,7 +42,6 @@ export function WindowDragRegion() {
         borderBottom: "1px solid",
         borderColor: "divider",
         bgcolor: "background.default",
-        // 教程中的 app-region: drag；Chromium/Electron 常用 -webkit-app-region
         WebkitAppRegion: "drag",
       }}
     >
@@ -61,4 +60,3 @@ export function WindowDragRegion() {
     </Box>
   );
 }
-

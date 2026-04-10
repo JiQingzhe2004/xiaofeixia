@@ -29,3 +29,4 @@ Thumbs.db
 *.asar
 package-lock.json
 docs/desktop-rewrite-api.md
+electron-dist/
