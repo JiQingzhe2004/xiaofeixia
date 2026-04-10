@@ -2,7 +2,7 @@ import {
   Box, Typography, Button, CircularProgress,
   Alert, Skeleton, TextField,
 } from "@mui/material";
-import { ExternalLink, CheckCircle, RefreshCw } from "lucide-react";
+import { ArrowLeft, ExternalLink, CheckCircle, RefreshCw } from "lucide-react";
 import type { AppCreationPollResult } from "../services/appCreationService";
 import type { LoginPollStatusEvent } from "../services/userLoginService";
 
@@ -12,13 +12,14 @@ interface Props {
   status: LoginPollStatusEvent | null;
   loading: boolean;
   error: string | null;
+  onBack: () => void;
   onBegin: () => void;
   onCancel: () => void;
 }
 
 /** 步骤 2: 用户登录 — 应用创建成功后登录飞书账号 */
 export default function StepLogin({
-  appResult, loginStarted, status, loading, error, onBegin, onCancel,
+  appResult, loginStarted, status, loading, error, onBack, onBegin, onCancel,
 }: Props) {
   return (
     <Box
@@ -132,30 +133,59 @@ export default function StepLogin({
       </Typography>
 
       {!loginStarted && !loading && (
-        <Button
-          variant="contained"
-          size="large"
-          onClick={onBegin}
-          startIcon={<ExternalLink size={18} />}
+        <Box
           sx={{
-            px: 3,
-            minHeight: 48,
-            borderRadius: "999px",
-            fontSize: "0.95rem",
-            fontWeight: 600,
-            textTransform: "none",
-            backgroundColor: "text.primary",
-            color: "background.default",
-            boxShadow: "none",
-            "&:hover": {
-              backgroundColor: "text.primary",
-              boxShadow: "none",
-              opacity: 0.92,
-            },
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 1.5,
+            flexWrap: "wrap",
           }}
         >
-          打开浏览器登录
-        </Button>
+          <Button
+            onClick={onBack}
+            startIcon={<ArrowLeft size={16} />}
+            sx={{
+              minHeight: 44,
+              px: 2.5,
+              borderRadius: "999px",
+              textTransform: "none",
+              fontSize: "0.9rem",
+              backgroundColor: "#d32f2f",
+              color: "#fff",
+              "&:hover": {
+                backgroundColor: "#c62828",
+              },
+            }}
+          >
+            上一步
+          </Button>
+
+          <Button
+            variant="contained"
+            size="large"
+            onClick={onBegin}
+            startIcon={<ExternalLink size={18} />}
+            sx={{
+              px: 3,
+              minHeight: 48,
+              borderRadius: "999px",
+              fontSize: "0.95rem",
+              fontWeight: 600,
+              textTransform: "none",
+              backgroundColor: "text.primary",
+              color: "background.default",
+              boxShadow: "none",
+              "&:hover": {
+                backgroundColor: "text.primary",
+                boxShadow: "none",
+                opacity: 0.92,
+              },
+            }}
+          >
+            打开授权页登录
+          </Button>
+        </Box>
       )}
 
       {loading && loginStarted && (

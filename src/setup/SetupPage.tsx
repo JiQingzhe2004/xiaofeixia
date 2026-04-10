@@ -62,12 +62,49 @@ export default function SetupPage({ onSetupComplete }: Props) {
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+  const ignoreNextAuthWindowClosedRef = useRef(false);
+  const activeStepRef = useRef(activeStep);
+  const appCreationPollingRef = useRef(appCreationPolling);
+  const loginStartedRef = useRef(loginStarted);
+
+  useEffect(() => {
+    activeStepRef.current = activeStep;
+  }, [activeStep]);
+
+  useEffect(() => {
+    appCreationPollingRef.current = appCreationPolling;
+  }, [appCreationPolling]);
+
+  useEffect(() => {
+    loginStartedRef.current = loginStarted;
+  }, [loginStarted]);
 
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
     };
   }, []);
+
+  useEffect(() => {
+    if (!window.authBridge?.onAuthWindowClosed) return;
+    return window.authBridge.onAuthWindowClosed(() => {
+      if (ignoreNextAuthWindowClosedRef.current) {
+        ignoreNextAuthWindowClosedRef.current = false;
+        return;
+      }
+
+      if (appCreationPollingRef.current || loginStartedRef.current) {
+        abortRef.current?.abort();
+        setLoading(false);
+        setAppCreationPolling(false);
+        setLoginStarted(false);
+
+        if (activeStepRef.current === 1 || activeStepRef.current === 2) {
+          pushNotice("你已关闭授权窗口，当前操作已取消。", { severity: "warning" });
+        }
+      }
+    });
+  }, [pushNotice]);
 
   const handleTaskError = useCallback((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
@@ -105,7 +142,7 @@ export default function SetupPage({ onSetupComplete }: Props) {
     setPollStatus(null);
     setAppCreationPolling(true);
     try {
-      window.shellBridge?.openExternal(appCreationData.verificationUrl);
+      await window.authBridge?.openAuthWindow(appCreationData.verificationUrl);
 
       abortRef.current = new AbortController();
       const result = await pollUntilComplete(
@@ -124,6 +161,11 @@ export default function SetupPage({ onSetupComplete }: Props) {
         userInfo: result.userInfo,
       });
 
+      ignoreNextAuthWindowClosedRef.current = true;
+      const closeResult = await window.authBridge?.closeAuthWindow();
+      if (!closeResult?.closed) {
+        ignoreNextAuthWindowClosedRef.current = false;
+      }
       setActiveStep(2);
     } catch (err: unknown) {
       handleTaskError(err);
@@ -142,11 +184,11 @@ export default function SetupPage({ onSetupComplete }: Props) {
       const brand = (appResult.brand || "feishu") as Brand;
       const data = await beginDeviceAuth(appResult.clientId!, appResult.clientSecret!, brand);
 
-      // 打开浏览器
       const authUrl = data.verificationUriComplete || data.verificationUri;
-      if (authUrl) window.shellBridge?.openExternal(authUrl);
+      if (authUrl) {
+        await window.authBridge?.openAuthWindow(authUrl);
+      }
 
-      // 轮询
       abortRef.current = new AbortController();
       const tokenResult = await loginPollUntilComplete({
         deviceCode: data.deviceCode,
@@ -172,6 +214,11 @@ export default function SetupPage({ onSetupComplete }: Props) {
         userInfo: info,
       });
 
+      ignoreNextAuthWindowClosedRef.current = true;
+      const closeResult = await window.authBridge?.closeAuthWindow();
+      if (!closeResult?.closed) {
+        ignoreNextAuthWindowClosedRef.current = false;
+      }
       setActiveStep(3);
     } catch (err: unknown) {
       handleTaskError(err);
@@ -184,7 +231,9 @@ export default function SetupPage({ onSetupComplete }: Props) {
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();
     setAppCreationPolling(false);
+    setLoginStarted(false);
     setLoading(false);
+    void window.authBridge?.closeAuthWindow();
   }, []);
 
   const copyToClipboard = useCallback((text: string) => {
@@ -197,9 +246,25 @@ export default function SetupPage({ onSetupComplete }: Props) {
     setPollStatus(null);
     setAppCreationData(null);
     setAppCreationPolling(false);
+    setLoginStarted(false);
     setLoading(false);
     setActiveStep(0);
+    void window.authBridge?.closeAuthWindow();
   }, [clearNotices]);
+
+  const handleBackToCreateApp = useCallback(() => {
+    setError(null);
+    setLoginStarted(false);
+    setLoading(false);
+    setActiveStep(1);
+    void window.authBridge?.closeAuthWindow();
+  }, []);
+
+  const handleContinueToLogin = useCallback(() => {
+    setError(null);
+    setLoading(false);
+    setActiveStep(2);
+  }, []);
 
   const handlePigClick = useCallback(() => {
     const message = PIG_EASTER_EGGS[Math.floor(Math.random() * PIG_EASTER_EGGS.length)];
@@ -296,6 +361,7 @@ export default function SetupPage({ onSetupComplete }: Props) {
             {activeStep === 1 && (
               <StepCreatingApp
               data={appCreationData}
+              appResult={appResult}
               status={pollStatus}
               loading={loading}
               error={error}
@@ -305,6 +371,7 @@ export default function SetupPage({ onSetupComplete }: Props) {
               onRetry={handleBeginAppCreation}
               onCopy={copyToClipboard}
               onOpenAuthorizationPage={handleOpenAppAuthorizationPage}
+              onContinue={handleContinueToLogin}
             />
           )}
 
@@ -315,6 +382,7 @@ export default function SetupPage({ onSetupComplete }: Props) {
                 status={loginPollStatus}
                 loading={loading}
                 error={error}
+                onBack={handleBackToCreateApp}
                 onBegin={handleBeginLogin}
                 onCancel={handleCancel}
               />

@@ -2,12 +2,17 @@ import {
   Box, Typography, Button, CircularProgress,
   Alert, Skeleton,
 } from "@mui/material";
-import { ArrowLeft, ExternalLink, RefreshCw } from "lucide-react";
+import { ArrowLeft, ArrowRight, ExternalLink, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { AppCreationBeginResult, PollStatusEvent } from "../services/appCreationService";
+import type {
+  AppCreationBeginResult,
+  AppCreationPollResult,
+  PollStatusEvent,
+} from "../services/appCreationService";
 
 interface Props {
   data: AppCreationBeginResult | null;
+  appResult?: AppCreationPollResult | null;
   status: PollStatusEvent | null;
   loading: boolean;
   error: string | null;
@@ -17,11 +22,12 @@ interface Props {
   onRetry: () => void;
   onCopy: (text: string) => void;
   onOpenAuthorizationPage: () => void;
+  onContinue: () => void;
 }
 
 /** 步骤 1: 等待用户在浏览器授权创建应用 */
 export default function StepCreatingApp({
-  data, status, loading, error, polling, onBack, onCancel, onRetry, onCopy, onOpenAuthorizationPage,
+  data, appResult, status, loading, error, polling, onBack, onCancel, onRetry, onCopy, onOpenAuthorizationPage, onContinue,
 }: Props) {
   const [copied, setCopied] = useState(false);
 
@@ -53,8 +59,10 @@ export default function StepCreatingApp({
         创建飞书应用
       </Typography>
 
-      <Typography sx={{ mb: 4, color: "text.secondary", maxWidth: 520, lineHeight: 1.7 }}>
-        先打开授权页面，再在浏览器中完成授权。
+      <Typography sx={{ mb: 3, color: "text.secondary", maxWidth: 520, lineHeight: 1.7 }}>
+        {appResult
+          ? "应用已经创建完成，可以直接进入登录授权。"
+          : "先打开授权页面，再在浏览器中完成授权。"}
       </Typography>
 
       {!data && loading && !polling && (
@@ -94,67 +102,26 @@ export default function StepCreatingApp({
             alignItems: "center",
           }}
         >
-          <Typography sx={{ mb: 1, display: "block", color: "text.secondary", maxWidth: 460 }}>
-            如果浏览器未自动打开，请手动访问并输入以下授权码：
-          </Typography>
-          <Typography
-            sx={{
-              mb: 2,
-              fontSize: "0.85rem",
-              color: copied ? "text.primary" : "text.secondary",
-            }}
-          >
-            {copied ? "已复制授权码" : "点击授权码即可复制"}
-          </Typography>
-
-          <Box
-            sx={{
-              display: "flex",
-              flexWrap: "wrap",
-              justifyContent: "center",
-              gap: 1,
-              cursor: "pointer",
-              userSelect: "none",
-              maxWidth: 520,
-            }}
-            onClick={handleCopy}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                handleCopy();
-              }
-            }}
-          >
-            {Array.from(data.userCode).map((char, index) => (
-              <Box
-                key={`${char}-${index}`}
-                sx={{
-                  width: 42,
-                  height: 42,
-                  borderRadius: "999px",
-                  backgroundColor: "text.primary",
-                  color: "background.default",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: "1.08rem",
-                  fontWeight: 800,
-                  fontFamily:
-                    '"SF Pro Display", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
-                  lineHeight: 1,
-                }}
-              >
-                {char}
-              </Box>
-            ))}
-          </Box>
+          {!!appResult && (
+            <Box
+              sx={{
+                mb: 2,
+                px: 2,
+                py: 1,
+                borderRadius: "999px",
+                backgroundColor: "action.hover",
+                color: "text.secondary",
+                fontSize: "0.9rem",
+              }}
+            >
+              应用已创建成功，现在可以直接继续登录授权。
+            </Box>
+          )}
 
           {!polling && (
             <Box
               sx={{
-                mt: 3,
+                mb: 2.5,
                 display: "flex",
                 gap: 1.5,
                 alignItems: "center",
@@ -182,8 +149,8 @@ export default function StepCreatingApp({
 
               <Button
                 size="large"
-                startIcon={<ExternalLink size={14} />}
-                onClick={onOpenAuthorizationPage}
+                startIcon={appResult ? <ArrowRight size={14} /> : <ExternalLink size={14} />}
+                onClick={appResult ? onContinue : onOpenAuthorizationPage}
                 sx={{
                   minHeight: 44,
                   px: 2.5,
@@ -195,9 +162,70 @@ export default function StepCreatingApp({
                   "&:hover": { backgroundColor: "text.primary", opacity: 0.92 },
                 }}
               >
-                打开授权页
+                {appResult ? "继续登录授权" : "打开授权页"}
               </Button>
             </Box>
+          )}
+
+          {!appResult && (
+            <>
+              <Typography sx={{ mb: 1, display: "block", color: "text.secondary", maxWidth: 460 }}>
+                如果浏览器未自动打开，请手动访问并输入以下授权码：
+              </Typography>
+              <Typography
+                sx={{
+                  mb: 2,
+                  fontSize: "0.85rem",
+                  color: copied ? "text.primary" : "text.secondary",
+                }}
+              >
+                {copied ? "已复制授权码" : "点击授权码即可复制"}
+              </Typography>
+
+              <Box
+                sx={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  justifyContent: "center",
+                  gap: 1,
+                  cursor: "pointer",
+                  userSelect: "none",
+                  maxWidth: 520,
+                }}
+                onClick={handleCopy}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    handleCopy();
+                  }
+                }}
+              >
+                {Array.from(data.userCode).map((char, index) => (
+                  <Box
+                    key={`${char}-${index}`}
+                    sx={{
+                      width: 42,
+                      height: 42,
+                      borderRadius: "999px",
+                      backgroundColor: "text.primary",
+                      color: "background.default",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: "1.08rem",
+                      fontWeight: 800,
+                      fontFamily:
+                        '"SF Pro Display", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+                      lineHeight: 1,
+                    }}
+                  >
+                    {char}
+                  </Box>
+                ))}
+              </Box>
+            </>
           )}
         </Box>
       )}

@@ -48,6 +48,9 @@ interface AuthBridge {
     deviceCode: string,
     brand?: "feishu" | "lark"
   ) => Promise<Record<string, unknown>>;
+  openAuthWindow: (url: string) => Promise<{ success: boolean }>;
+  closeAuthWindow: () => Promise<{ success: boolean; closed: boolean }>;
+  onAuthWindowClosed: (callback: () => void) => () => void;
   beginDeviceAuth: (params: {
     appId: string;
     appSecret: string;

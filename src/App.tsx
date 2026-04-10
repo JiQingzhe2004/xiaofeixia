@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Box, CircularProgress, Typography } from "@mui/material";
 import { WindowDragRegion, TITLEBAR_HEIGHT } from "./components/windowChrome";
 import SetupPage from "./setup/SetupPage";
+import AuthWindowPage from "./auth/AuthWindowPage";
 
 /** 主页面占位 — 初始化完成后显示 */
 function MainPage() {
@@ -26,6 +27,17 @@ function MainPage() {
 }
 
 export default function App() {
+  const searchParams = new URLSearchParams(window.location.search);
+  const isAuthShell = searchParams.get("auth-shell") === "1";
+
+  if (isAuthShell) {
+    return <AuthWindowPage />;
+  }
+
+  return <MainApp />;
+}
+
+function MainApp() {
   // null: 检查中, "setup": 需要初始化, "main": 已初始化
   const [appState, setAppState] = useState<"setup" | "main" | null>(null);
 

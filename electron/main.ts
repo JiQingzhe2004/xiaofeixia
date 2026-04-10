@@ -1,9 +1,13 @@
-import { app, BrowserWindow, Menu, ipcMain, shell } from "electron";
+import { app, BrowserWindow, Menu, WebContentsView, ipcMain, shell } from "electron";
 import * as path from "node:path";
 import * as tokenStore from "./tokenStore";
 
 const TITLEBAR_HEIGHT = 40;
 type Brand = "feishu" | "lark";
+let mainWindow: BrowserWindow | null = null;
+let authWindow: BrowserWindow | null = null;
+let authView: WebContentsView | null = null;
+let suppressAuthWindowClosedEvent = false;
 
 function resolveBrand(brand: Brand = "feishu") {
   if (brand === "lark") {
@@ -28,17 +32,9 @@ async function parseJsonResponse(resp: Response) {
   }
 }
 
-function createWindow() {
-  const preloadPath = path.join(__dirname, "preload.js");
-
-  const win = new BrowserWindow({
-    width: 1100,
-    height: 750,
-    title: "肥猪",
-    // 官方教程：隐藏默认标题栏；macOS 保留左上角红绿灯
-    // https://www.electronjs.org/zh/docs/latest/tutorial/custom-title-bar
-    titleBarStyle: "hidden",
-    // Windows / Linux：通过 titleBarOverlay 显示原生最小化、最大化、关闭
+function getSharedWindowChromeOptions() {
+  return {
+    titleBarStyle: "hidden" as const,
     ...(process.platform !== "darwin"
       ? {
           titleBarOverlay: {
@@ -48,15 +44,26 @@ function createWindow() {
           },
         }
       : {}),
+    icon: path.join(
+      __dirname,
+      `../resources/icons/${process.platform === "win32" ? "icon.ico" : "icon_1024.png"}`
+    ),
+  };
+}
+
+function createWindow() {
+  const preloadPath = path.join(__dirname, "preload.js");
+
+  const win = new BrowserWindow({
+    width: 1100,
+    height: 750,
+    title: "肥猪",
+    ...getSharedWindowChromeOptions(),
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
     },
-    icon: path.join(
-      __dirname,
-      `../resources/icons/${process.platform === "win32" ? "icon.ico" : "icon_1024.png"}`
-    ),
   });
 
   win.on("page-title-updated", (e) => {
@@ -81,6 +88,111 @@ function createWindow() {
       }
     });
   }
+
+  mainWindow = win;
+}
+
+function getRendererEntryUrl(search = "") {
+  if (!app.isPackaged) {
+    return `http://127.0.0.1:5173/${search}`;
+  }
+  return path.join(__dirname, "../dist/index.html");
+}
+
+function updateAuthViewBounds() {
+  if (!authWindow || authWindow.isDestroyed() || !authView) return;
+  const bounds = authWindow.getContentBounds();
+  authView.setBounds({
+    x: 0,
+    y: TITLEBAR_HEIGHT,
+    width: bounds.width,
+    height: Math.max(0, bounds.height - TITLEBAR_HEIGHT),
+  });
+}
+
+function closeAuthWindow(notify = false) {
+  if (authView && authWindow && !authWindow.isDestroyed()) {
+    authWindow.contentView.removeChildView(authView);
+    authView = null;
+  }
+
+  if (!authWindow || authWindow.isDestroyed()) {
+    authWindow = null;
+    return false;
+  }
+
+  const current = authWindow;
+  authWindow = null;
+  suppressAuthWindowClosedEvent = !notify;
+  current.close();
+
+  if (notify && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("auth:windowClosed");
+  }
+
+  return true;
+}
+
+function openAuthWindow(url: string) {
+  closeAuthWindow(false);
+
+  authWindow = new BrowserWindow({
+    width: 640,
+    height: 860,
+    minWidth: 560,
+    minHeight: 760,
+    title: "授权",
+    autoHideMenuBar: true,
+    parent: mainWindow ?? undefined,
+    modal: false,
+    ...getSharedWindowChromeOptions(),
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  authWindow.on("page-title-updated", (e) => {
+    e.preventDefault();
+  });
+
+  authWindow.on("closed", () => {
+    authWindow?.removeListener("resize", updateAuthViewBounds);
+    authView = null;
+    authWindow = null;
+    if (!suppressAuthWindowClosedEvent && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("auth:windowClosed");
+    }
+    suppressAuthWindowClosedEvent = false;
+  });
+
+  authWindow.on("resize", updateAuthViewBounds);
+
+  authView = new WebContentsView({
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  authView.webContents.setWindowOpenHandler(({ url: targetUrl }) => {
+    void shell.openExternal(targetUrl);
+    return { action: "deny" };
+  });
+
+  authWindow.contentView.addChildView(authView);
+
+  if (!app.isPackaged) {
+    void authWindow.loadURL(getRendererEntryUrl("?auth-shell=1"));
+  } else {
+    void authWindow.loadFile(getRendererEntryUrl(), { search: "?auth-shell=1" });
+  }
+
+  authWindow.webContents.once("did-finish-load", () => {
+    updateAuthViewBounds();
+    void authView?.webContents.loadURL(url);
+  });
 }
 
 // ── 标题栏 IPC ──
@@ -125,6 +237,15 @@ ipcMain.handle("config:clearConfig", () => {
 // ── 打开外部链接 IPC ──
 ipcMain.handle("shell:openExternal", (_event, url) => {
   return shell.openExternal(url);
+});
+
+ipcMain.handle("auth:openAuthWindow", (_event, url: string) => {
+  openAuthWindow(url);
+  return { success: true };
+});
+
+ipcMain.handle("auth:closeAuthWindow", () => {
+  return { success: true, closed: closeAuthWindow(false) };
 });
 
 // ── OAuth / App Registration IPC ──

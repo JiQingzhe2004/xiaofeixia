@@ -33,6 +33,13 @@ contextBridge.exposeInMainWorld("authBridge", {
   beginAppCreation: () => ipcRenderer.invoke("auth:beginAppCreation"),
   pollAppCreation: (deviceCode: string, brand?: "feishu" | "lark") =>
     ipcRenderer.invoke("auth:pollAppCreation", deviceCode, brand),
+  openAuthWindow: (url: string) => ipcRenderer.invoke("auth:openAuthWindow", url),
+  closeAuthWindow: () => ipcRenderer.invoke("auth:closeAuthWindow"),
+  onAuthWindowClosed: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on("auth:windowClosed", listener);
+    return () => ipcRenderer.removeListener("auth:windowClosed", listener);
+  },
   beginDeviceAuth: (params: {
     appId: string;
     appSecret: string;
