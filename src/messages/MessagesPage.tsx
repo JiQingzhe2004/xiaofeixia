@@ -1,17 +1,15 @@
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Avatar,
   Box,
   Button,
-  CircularProgress,
   Divider,
   InputAdornment,
   List,
   ListItemAvatar,
   ListItemButton,
   ListItemText,
-  Paper,
   Skeleton,
   Stack,
   Tab,
@@ -22,7 +20,12 @@ import {
 import { MessageCircleMore, Search } from "lucide-react";
 import fallbackAvatar from "../../resources/icons/Avatar.png";
 
-type SearchMode = "users" | "chats";
+const DEFAULT_LIST_WIDTH = 332;
+const MIN_LIST_WIDTH = 260;
+const MAX_LIST_WIDTH = 520;
+const MIN_CONTENT_WIDTH = 420;
+
+type BrowseMode = "contacts" | "chats";
 type MessageConversation = {
   id: string;
   type: "p2p" | "group";
@@ -78,13 +81,20 @@ function formatMessageContent(message: MessageRecord) {
   return placeholders[message.messageType] || "[消息]";
 }
 
+function sortConversations(items: MessageConversation[]) {
+  return [...items].sort((left, right) => left.title.localeCompare(right.title, "zh-CN"));
+}
+
 export default function MessagesPage() {
-  const [searchMode, setSearchMode] = useState<SearchMode>("users");
+  const [browseMode, setBrowseMode] = useState<BrowseMode>("contacts");
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
-  const [results, setResults] = useState<MessageConversation[]>([]);
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [searchError, setSearchError] = useState("");
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [items, setItems] = useState<MessageConversation[]>([]);
+  const [listLoading, setListLoading] = useState(false);
+  const [listError, setListError] = useState("");
+  const [listWidth, setListWidth] = useState(DEFAULT_LIST_WIDTH);
+  const [isResizing, setIsResizing] = useState(false);
   const [selectedConversation, setSelectedConversation] = useState<MessageConversation | null>(null);
   const [messages, setMessages] = useState<MessageRecord[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
@@ -95,44 +105,90 @@ export default function MessagesPage() {
   const trimmedQuery = deferredQuery.trim();
 
   useEffect(() => {
+    if (!isResizing) {
+      return;
+    }
+
+    function clampListWidth(clientX: number) {
+      const container = containerRef.current;
+      if (!container) return;
+      const bounds = container.getBoundingClientRect();
+      const maxAllowed = Math.max(
+        MIN_LIST_WIDTH,
+        Math.min(MAX_LIST_WIDTH, bounds.width - MIN_CONTENT_WIDTH)
+      );
+      const nextWidth = clientX - bounds.left;
+      setListWidth(Math.min(maxAllowed, Math.max(MIN_LIST_WIDTH, nextWidth)));
+    }
+
+    function handlePointerMove(event: PointerEvent) {
+      clampListWidth(event.clientX);
+    }
+
+    function handlePointerUp() {
+      setIsResizing(false);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+  }, [isResizing]);
+
+  useEffect(() => {
     let cancelled = false;
 
-    async function runSearch() {
-      if (!trimmedQuery) {
-        setResults([]);
-        setSearchError("");
-        setSearchLoading(false);
-        return;
-      }
-
-      setSearchLoading(true);
-      setSearchError("");
+    async function loadBrowseItems() {
+      setListLoading(true);
+      setListError("");
 
       try {
         const response =
-          searchMode === "users"
-            ? await window.messagesBridge?.searchUsers(trimmedQuery)
-            : await window.messagesBridge?.searchChats(trimmedQuery);
+          browseMode === "contacts"
+            ? await window.messagesBridge?.listContacts()
+            : await window.messagesBridge?.listChats();
 
         if (cancelled) return;
-        setResults(response?.items || []);
+        setItems(sortConversations(response?.items || []));
       } catch (error) {
         if (cancelled) return;
-        setResults([]);
-        setSearchError(error instanceof Error ? error.message : String(error));
+        setItems([]);
+        setListError(error instanceof Error ? error.message : String(error));
       } finally {
         if (!cancelled) {
-          setSearchLoading(false);
+          setListLoading(false);
         }
       }
     }
 
-    void runSearch();
+    void loadBrowseItems();
 
     return () => {
       cancelled = true;
     };
-  }, [searchMode, trimmedQuery]);
+  }, [browseMode]);
+
+  const visibleItems = useMemo(() => {
+    if (!trimmedQuery) {
+      return items;
+    }
+
+    const keyword = trimmedQuery.toLocaleLowerCase();
+    return items.filter((item) => {
+      const title = item.title.toLocaleLowerCase();
+      const subtitle = item.subtitle?.toLocaleLowerCase() || "";
+      return title.includes(keyword) || subtitle.includes(keyword);
+    });
+  }, [items, trimmedQuery]);
 
   const currentConversation = useMemo(() => {
     if (!selectedConversation) return null;
@@ -198,35 +254,35 @@ export default function MessagesPage() {
 
   return (
     <Box
+      ref={containerRef}
       sx={{
         height: "100%",
         display: "flex",
-        gap: 2,
-        p: 2,
         alignItems: "stretch",
         minHeight: 0,
+        bgcolor: "background.paper",
       }}
     >
-      <Paper
-        variant="outlined"
+      <Box
         sx={{
-          width: 340,
+          width: listWidth,
+          flexShrink: 0,
           display: "flex",
           flexDirection: "column",
           minHeight: 0,
-          borderRadius: 3,
           overflow: "hidden",
+          bgcolor: "background.paper",
         }}
       >
-        <Box sx={{ p: 2 }}>
+        <Box sx={{ px: 2, pt: 2, pb: 1.5 }}>
           <Tabs
-            value={searchMode}
-            onChange={(_event, value: SearchMode) => setSearchMode(value)}
+            value={browseMode}
+            onChange={(_event, value: BrowseMode) => setBrowseMode(value)}
             variant="fullWidth"
             sx={{ minHeight: 40 }}
           >
-            <Tab label="联系人" value="users" sx={{ minHeight: 40 }} />
-            <Tab label="群聊" value="chats" sx={{ minHeight: 40 }} />
+            <Tab label="联系人" value="contacts" sx={{ minHeight: 40 }} />
+            <Tab label="会话" value="chats" sx={{ minHeight: 40 }} />
           </Tabs>
 
           <TextField
@@ -234,7 +290,7 @@ export default function MessagesPage() {
             size="small"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder={searchMode === "users" ? "搜索联系人" : "搜索群聊"}
+            placeholder={browseMode === "contacts" ? "筛选联系人" : "筛选会话"}
             sx={{ mt: 2 }}
             InputProps={{
               startAdornment: (
@@ -248,106 +304,149 @@ export default function MessagesPage() {
 
         <Divider />
 
-        {selectedConversation && (
-          <>
-            <Box sx={{ p: 2, pb: 1 }}>
+        <Box sx={{ px: 2, pt: 2, pb: 1 }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center">
+            <Typography variant="caption" color="text.secondary">
+              {trimmedQuery
+                ? "筛选结果"
+                : browseMode === "contacts"
+                  ? "联系人列表"
+                  : "会话列表"}
+            </Typography>
+            {!listLoading && items.length > 0 && (
               <Typography variant="caption" color="text.secondary">
-                当前会话
+                {items.length} 项
               </Typography>
-            </Box>
-            <List disablePadding sx={{ px: 1, pb: 1 }}>
-              <ListItemButton selected sx={{ borderRadius: 2 }}>
-                <ListItemAvatar>
-                  <Avatar
-                    src={selectedConversation.avatarUrl || fallbackAvatar}
-                    alt={selectedConversation.title}
-                  />
-                </ListItemAvatar>
-                <ListItemText
-                  primary={selectedConversation.title}
-                  secondary={
-                    selectedConversation.type === "p2p" ? "私聊会话" : selectedConversation.subtitle || "群聊会话"
-                  }
-                  primaryTypographyProps={{ noWrap: true, fontWeight: 600 }}
-                  secondaryTypographyProps={{ noWrap: true }}
-                />
-              </ListItemButton>
-            </List>
-            <Divider />
-          </>
-        )}
-
-        <Box sx={{ p: 2, pb: 1 }}>
-          <Typography variant="caption" color="text.secondary">
-            {trimmedQuery ? "搜索结果" : "消息入口"}
-          </Typography>
+            )}
+          </Stack>
         </Box>
 
         <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", px: 1, pb: 1 }}>
-          {!trimmedQuery ? (
-            <EmptyState
-              title="搜索后查看消息"
-              description={
-                searchMode === "users"
-                  ? "输入联系人姓名、邮箱或手机号后，可以直接进入私聊消息。"
-                  : "输入群聊名称后，可以直接查看群消息。"
-              }
-            />
-          ) : searchLoading ? (
+          {listLoading ? (
             <Stack spacing={1} sx={{ p: 1 }}>
-              {Array.from({ length: 5 }).map((_, index) => (
+              {Array.from({ length: 6 }).map((_, index) => (
                 <Skeleton key={index} variant="rounded" height={56} />
               ))}
             </Stack>
-          ) : searchError ? (
+          ) : listError ? (
             <Alert severity="error" sx={{ m: 1 }}>
-              {searchError}
+              {listError}
             </Alert>
-          ) : results.length === 0 ? (
-            <EmptyState title="没有找到结果" description="换个关键词试试，或者检查当前登录权限。" />
+          ) : visibleItems.length === 0 ? (
+            <EmptyState
+              title={trimmedQuery ? "没有匹配结果" : browseMode === "contacts" ? "暂无联系人" : "暂无会话"}
+              description={
+                trimmedQuery
+                  ? "换个关键词试试，或者切换到另一个列表。"
+                  : browseMode === "contacts"
+                    ? "当前登录下还没有可见的联系人列表。"
+                    : "当前登录下还没有可见的会话列表。"
+              }
+            />
           ) : (
             <List disablePadding>
-              {results.map((result) => (
-                <ListItemButton
-                  key={result.id}
-                  onClick={() => void handleSelectConversation(result)}
-                  selected={selectedConversation?.id === result.id}
-                  sx={{ borderRadius: 2, mb: 0.5 }}
-                >
-                  <ListItemAvatar>
-                    <Avatar src={result.avatarUrl || fallbackAvatar} alt={result.title} />
-                  </ListItemAvatar>
-                  <ListItemText
-                    primary={result.title}
-                    secondary={result.subtitle || (result.type === "p2p" ? "联系人" : "群聊")}
-                    primaryTypographyProps={{ noWrap: true, fontWeight: 600 }}
-                    secondaryTypographyProps={{ noWrap: true }}
-                  />
-                </ListItemButton>
+              {visibleItems.map((item) => (
+                <Box key={item.id}>
+                  <ListItemButton
+                    onClick={() => void handleSelectConversation(item)}
+                    selected={selectedConversation?.id === item.id}
+                    sx={{
+                      px: 1.25,
+                      py: 1.1,
+                      borderRadius: 1.75,
+                      mb: 0.5,
+                    }}
+                  >
+                    <ListItemAvatar>
+                      <Avatar src={item.avatarUrl || fallbackAvatar} alt={item.title} />
+                    </ListItemAvatar>
+                    <ListItemText
+                      primary={item.title}
+                      secondary={
+                        browseMode === "contacts"
+                          ? item.subtitle || "联系人"
+                          : item.subtitle || (item.type === "p2p" ? "私聊会话" : "群聊会话")
+                      }
+                      primaryTypographyProps={{ noWrap: true, fontWeight: 600 }}
+                      secondaryTypographyProps={{ noWrap: true }}
+                    />
+                  </ListItemButton>
+                </Box>
               ))}
             </List>
           )}
         </Box>
-      </Paper>
+      </Box>
 
-      <Paper
-        variant="outlined"
+      <Box
+        role="separator"
+        aria-orientation="vertical"
+        onPointerDown={(event) => {
+          event.preventDefault();
+          setIsResizing(true);
+          const container = containerRef.current;
+          if (!container) return;
+          const bounds = container.getBoundingClientRect();
+          const maxAllowed = Math.max(
+            MIN_LIST_WIDTH,
+            Math.min(MAX_LIST_WIDTH, bounds.width - MIN_CONTENT_WIDTH)
+          );
+          const nextWidth = event.clientX - bounds.left;
+          setListWidth(Math.min(maxAllowed, Math.max(MIN_LIST_WIDTH, nextWidth)));
+        }}
+        sx={{
+          width: 8,
+          flexShrink: 0,
+          cursor: "col-resize",
+          position: "relative",
+          bgcolor: isResizing ? "action.hover" : "transparent",
+          transition: "background-color 160ms ease",
+          touchAction: "none",
+          "&::before": {
+            content: '""',
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            left: "50%",
+            width: "1px",
+            transform: "translateX(-50%)",
+            bgcolor: "divider",
+          },
+          "&:hover": {
+            bgcolor: "action.hover",
+          },
+        }}
+      />
+
+      <Box
         sx={{
           flex: 1,
           minWidth: 0,
           minHeight: 0,
-          borderRadius: 3,
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
+          bgcolor: "background.default",
         }}
       >
         {!currentConversation ? (
-          <EmptyState title="选择一个会话" description="从左侧搜索联系人或群聊，然后查看消息内容。" />
+          <EmptyState title="选择一个会话" description="从左侧联系人或会话列表里选择一项，然后查看消息内容。" />
         ) : (
           <>
-            <Box sx={{ px: 2.5, py: 2, display: "flex", alignItems: "center", gap: 1.5 }}>
-              <Avatar src={currentConversation.avatarUrl || fallbackAvatar} alt={currentConversation.title} />
+            <Box
+              sx={{
+                px: 2.5,
+                py: 1.75,
+                display: "flex",
+                alignItems: "center",
+                gap: 1.5,
+                bgcolor: "background.paper",
+              }}
+            >
+              <Avatar
+                src={currentConversation.avatarUrl || fallbackAvatar}
+                alt={currentConversation.title}
+              />
               <Box sx={{ minWidth: 0 }}>
                 <Typography variant="subtitle1" fontWeight={700} noWrap>
                   {currentConversation.title}
@@ -362,11 +461,13 @@ export default function MessagesPage() {
 
             <Divider />
 
-            <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", p: 2.5 }}>
+            <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", bgcolor: "background.default" }}>
               {messagesError ? (
-                <Alert severity="error">{messagesError}</Alert>
+                <Alert severity="error" sx={{ m: 2.5 }}>
+                  {messagesError}
+                </Alert>
               ) : messagesLoading && messages.length === 0 ? (
-                <Stack spacing={1.5}>
+                <Stack spacing={1.5} sx={{ p: 2.5 }}>
                   {Array.from({ length: 6 }).map((_, index) => (
                     <Skeleton key={index} variant="rounded" height={84} />
                   ))}
@@ -374,9 +475,9 @@ export default function MessagesPage() {
               ) : messages.length === 0 ? (
                 <EmptyState title="暂无消息" description="这个会话里还没有可显示的消息内容。" />
               ) : (
-                <Stack spacing={1.5}>
+                <Box>
                   {hasMoreMessages && (
-                    <Box sx={{ display: "flex", justifyContent: "center", pb: 1 }}>
+                    <Box sx={{ display: "flex", justifyContent: "center", py: 1.5 }}>
                       <Button
                         variant="text"
                         onClick={() => void loadMessages(currentConversation, messagesPageToken)}
@@ -387,13 +488,19 @@ export default function MessagesPage() {
                     </Box>
                   )}
 
-                  {messages.map((message) => (
-                    <Paper
+                  {messages.map((message, index) => (
+                    <Box
                       key={message.messageId}
-                      variant="outlined"
-                      sx={{ p: 1.5, borderRadius: 2.5, bgcolor: "background.paper" }}
+                      sx={{
+                        px: 2.5,
+                        py: 1.75,
+                        borderTop: index === 0 ? "1px solid" : "none",
+                        borderBottom: "1px solid",
+                        borderColor: "divider",
+                        bgcolor: "background.paper",
+                      }}
                     >
-                      <Stack spacing={0.75}>
+                      <Stack spacing={0.75} sx={{ maxWidth: 920 }}>
                         <Box
                           sx={{
                             display: "flex",
@@ -416,14 +523,14 @@ export default function MessagesPage() {
                           {formatMessageContent(message)}
                         </Typography>
                       </Stack>
-                    </Paper>
+                    </Box>
                   ))}
-                </Stack>
+                </Box>
               )}
             </Box>
           </>
         )}
-      </Paper>
+      </Box>
     </Box>
   );
 }

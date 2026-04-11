@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld("appWindow", {
   /** 主进程已启用 titleBarStyle: hidden（自定义标题栏模式） */
   customTitleBar: true,
   platform: process.platform,
+  openMessagesWindow: () => ipcRenderer.invoke("window:openMessagesWindow"),
   /** 仅 Windows / Linux 有效；macOS 使用红绿灯，不通过 overlay 调色 */
   setTitleBarOverlay: (opts: { color?: string; symbolColor?: string; height?: number }) =>
     ipcRenderer.invoke("window:setTitleBarOverlay", opts),
@@ -35,6 +36,8 @@ contextBridge.exposeInMainWorld("shellBridge", {
 });
 
 contextBridge.exposeInMainWorld("messagesBridge", {
+  listContacts: () => ipcRenderer.invoke("messages:listContacts"),
+  listChats: () => ipcRenderer.invoke("messages:listChats"),
   searchUsers: (query: string) => ipcRenderer.invoke("messages:searchUsers", query),
   searchChats: (query: string) => ipcRenderer.invoke("messages:searchChats", query),
   resolveP2PChat: (userOpenId: string) => ipcRenderer.invoke("messages:resolveP2PChat", userOpenId),

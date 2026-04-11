@@ -25,7 +25,7 @@ export function TitleBarSync() {
  * 可拖拽标题栏区域
  * https://www.electronjs.org/zh/docs/latest/tutorial/custom-title-bar
  */
-export function WindowDragRegion() {
+export function WindowDragRegion(props?: { title?: string }) {
   if (!window.appWindow?.customTitleBar) return null;
   return (
     <Box
@@ -55,7 +55,7 @@ export function WindowDragRegion() {
           opacity: 0.95,
         }}
       >
-        肥猪
+        {props?.title || "肥猪"}
       </Typography>
     </Box>
   );

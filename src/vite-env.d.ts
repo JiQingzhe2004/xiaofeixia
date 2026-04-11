@@ -5,6 +5,7 @@ import type { UiPreferences } from "./types/uiPreferences";
 interface AppWindowBridge {
   customTitleBar: boolean;
   platform: string;
+  openMessagesWindow: () => Promise<{ success: boolean }>;
   setTitleBarOverlay: (opts: {
     color?: string;
     symbolColor?: string;
@@ -66,6 +67,8 @@ interface MessageItem {
 }
 
 interface MessagesBridge {
+  listContacts: () => Promise<{ items: MessageConversationItem[] }>;
+  listChats: () => Promise<{ items: MessageConversationItem[] }>;
   searchUsers: (query: string) => Promise<{ items: MessageConversationItem[] }>;
   searchChats: (query: string) => Promise<{ items: MessageConversationItem[] }>;
   resolveP2PChat: (userOpenId: string) => Promise<{ chatId: string }>;

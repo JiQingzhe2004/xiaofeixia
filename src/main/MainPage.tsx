@@ -24,17 +24,17 @@ import { TITLEBAR_HEIGHT, WindowDragRegion } from "../components/windowChrome";
 import feizhuLogo from "../../resources/icons/feizhu.png";
 import feizhuIcon from "../../resources/icons/Avatar.png";
 import packageJson from "../../package.json";
-import MessagesPage from "../messages/MessagesPage";
 import SettingsPage from "../settings/SettingsPage";
 
 const SIDEBAR_EXPANDED_WIDTH = 248;
 const SIDEBAR_COLLAPSED_WIDTH = 76;
-type MainSection = "home" | "messages" | "settings";
+type MainSection = "home" | "settings";
+type NavSection = MainSection | "messages";
 
-const navItems = [
-  { id: "home" as MainSection, label: "首页", icon: Home },
-  { id: "messages" as MainSection, label: "消息", icon: MessageCircle },
-  { id: "settings" as MainSection, label: "设置", icon: Settings },
+const navItems: Array<{ id: NavSection; label: string; icon: typeof Home }> = [
+  { id: "home", label: "首页", icon: Home },
+  { id: "messages", label: "消息", icon: MessageCircle },
+  { id: "settings", label: "设置", icon: Settings },
 ];
 
 interface Props {
@@ -192,7 +192,13 @@ export default function MainPage({ userName, avatarUrl, onLogout, onReauthorized
                   >
                     <ListItemButton
                       selected={item.id === activeSection}
-                      onClick={() => setActiveSection(item.id)}
+                      onClick={() => {
+                        if (item.id === "messages") {
+                          void window.appWindow?.openMessagesWindow();
+                          return;
+                        }
+                        setActiveSection(item.id);
+                      }}
                       sx={{
                         mb: 0.5,
                         minHeight: 44,
@@ -472,12 +478,6 @@ export default function MainPage({ userName, avatarUrl, onLogout, onReauthorized
                   </Box>
                   小猪，准备好探险了吗？
                 </Typography>
-              </Box>
-            )}
-
-            {activeSection === "messages" && (
-              <Box sx={{ flex: 1, minWidth: 0, minHeight: 0, height: "100%" }}>
-                <MessagesPage />
               </Box>
             )}
 

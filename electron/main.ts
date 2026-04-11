@@ -4,24 +4,15 @@ import * as tokenStore from "./tokenStore";
 
 const TITLEBAR_HEIGHT = 40;
 type Brand = "feishu" | "lark";
-type SearchUsersResult = {
+type ConversationListResult = {
   items: Array<{
     id: string;
-    type: "p2p";
+    type: "p2p" | "group";
     title: string;
     subtitle?: string;
     avatarUrl?: string;
+    chatId?: string;
     userOpenId: string;
-  }>;
-};
-type SearchChatsResult = {
-  items: Array<{
-    id: string;
-    type: "group";
-    title: string;
-    subtitle?: string;
-    avatarUrl?: string;
-    chatId: string;
   }>;
 };
 type ListChatMessagesResult = {
@@ -49,6 +40,7 @@ class FeishuApiError extends Error {
   }
 }
 let mainWindow: BrowserWindow | null = null;
+let messagesWindow: BrowserWindow | null = null;
 let authWindow: BrowserWindow | null = null;
 let authView: WebContentsView | null = null;
 let suppressAuthWindowClosedEvent = false;
@@ -316,7 +308,97 @@ function getSenderOpenId(sender: Record<string, unknown> | undefined) {
   return typeof openId === "string" ? openId : "";
 }
 
-async function searchUsers(query: string): Promise<SearchUsersResult> {
+function extractAvatarUrl(source: unknown) {
+  if (typeof source === "string") {
+    return source;
+  }
+
+  if (!source || typeof source !== "object") {
+    return "";
+  }
+
+  const avatar = source as Record<string, unknown>;
+  return String(
+    avatar.avatar_origin ||
+      avatar.avatar_url ||
+      avatar.default_avatar_url ||
+      avatar.image_url ||
+      ""
+  );
+}
+
+function normalizeUserConversation(user: Record<string, unknown>) {
+  const openId = String(user.open_id || user.user_id || "");
+  return {
+    id: `user:${openId}`,
+    type: "p2p" as const,
+    title: String(
+      user.name ||
+        user.user_name ||
+        user.display_name ||
+        user.employee_name ||
+        user.cn_name ||
+        openId
+    ),
+    subtitle: String(
+      user.enterprise_email ||
+        user.email ||
+        user.mobile ||
+        user.department_name ||
+        user.department ||
+        ""
+    ),
+    avatarUrl: extractAvatarUrl(user.avatar) || undefined,
+    userOpenId: openId,
+  };
+}
+
+function normalizeChatConversation(rawItem: Record<string, unknown>) {
+  const item = ((rawItem.meta_data as Record<string, unknown> | undefined) || rawItem) as Record<
+    string,
+    unknown
+  >;
+  const chatId = String(item.chat_id || "");
+  const chatMode = String(item.chat_mode || item.chat_type || "");
+  const userOpenId = String(item.p2p_chatter_id || item.open_id || "");
+  const type = chatMode.toLowerCase() === "p2p" ? "p2p" : "group";
+  const title = String(item.name || item.chat_name || item.display_name || chatId || userOpenId);
+  const description = String(item.description || item.chat_mode || "");
+
+  return {
+    id: type === "p2p" && userOpenId ? `user:${userOpenId}` : `chat:${chatId}`,
+    type,
+    title,
+    subtitle:
+      description || (type === "p2p" ? "私聊会话" : "群聊会话"),
+    avatarUrl: extractAvatarUrl(item.avatar) || undefined,
+    chatId: chatId || undefined,
+    userOpenId: userOpenId || "",
+  };
+}
+
+async function collectPagedItems(
+  fetchPage: (
+    pageToken?: string
+  ) => Promise<{ items?: Array<Record<string, unknown>>; has_more?: boolean; page_token?: string }>,
+  options?: { maxPages?: number }
+) {
+  const items: Array<Record<string, unknown>> = [];
+  let pageToken = "";
+  let page = 0;
+  const maxPages = options?.maxPages || 100;
+
+  do {
+    const data = await fetchPage(pageToken || undefined);
+    items.push(...(data.items || []));
+    pageToken = data.has_more && data.page_token ? String(data.page_token) : "";
+    page += 1;
+  } while (pageToken && page < maxPages);
+
+  return items;
+}
+
+async function searchUsers(query: string): Promise<ConversationListResult> {
   const { brand, accessToken, scope } = getAuthContext();
   ensureScopes(scope, ["contact:user:search"]);
   const data = await callOpenApiWithRefresh<{ users?: Array<Record<string, unknown>> }>({
@@ -330,35 +412,44 @@ async function searchUsers(query: string): Promise<SearchUsersResult> {
     },
   });
 
-  const items = (data.users || []).map((user) => {
-    const avatar = user.avatar;
-    const avatarUrl =
-      avatar && typeof avatar === "object"
-        ? String((avatar as Record<string, unknown>).avatar_origin || "")
-        : "";
-    const openId = String(user.open_id || "");
-
-    return {
-      id: `user:${openId}`,
-      type: "p2p" as const,
-      title: String(
-        user.name ||
-          user.user_name ||
-          user.display_name ||
-          user.employee_name ||
-          user.cn_name ||
-          openId
-      ),
-      subtitle: String(user.enterprise_email || user.email || user.mobile || ""),
-      avatarUrl: avatarUrl || undefined,
-      userOpenId: openId,
-    };
-  });
+  const items = (data.users || []).map(normalizeUserConversation);
 
   return { items: items.filter((item) => item.userOpenId) };
 }
 
-async function searchChats(query: string): Promise<SearchChatsResult> {
+async function listContacts(): Promise<ConversationListResult> {
+  const { brand, accessToken, scope } = getAuthContext();
+  ensureScopes(scope, ["contact:contact.base:readonly"]);
+  const users = await collectPagedItems((pageToken) =>
+    callOpenApiWithRefresh<{
+      items?: Array<Record<string, unknown>>;
+      has_more?: boolean;
+      page_token?: string;
+    }>({
+      brand,
+      accessToken,
+      method: "GET",
+      apiPath: "/open-apis/contact/v3/users",
+      query: {
+        user_id_type: "open_id",
+        page_size: 100,
+        page_token: pageToken,
+      },
+    })
+  );
+
+  const deduped = new Map<string, ReturnType<typeof normalizeUserConversation>>();
+  users
+    .map(normalizeUserConversation)
+    .filter((item) => item.userOpenId)
+    .forEach((item) => {
+      deduped.set(item.id, item);
+    });
+
+  return { items: Array.from(deduped.values()) };
+}
+
+async function searchChats(query: string): Promise<ConversationListResult> {
   const { brand, accessToken, scope } = getAuthContext();
   ensureScopes(scope, ["im:chat:read"]);
   const data = await callOpenApiWithRefresh<{ items?: Array<Record<string, unknown>> }>({
@@ -374,32 +465,40 @@ async function searchChats(query: string): Promise<SearchChatsResult> {
     },
   });
 
-  const items = (data.items || [])
-    .map((item) => {
-      const meta = (item.meta_data || {}) as Record<string, unknown>;
-      const chatId = String(meta.chat_id || "");
-      const avatar = meta.avatar;
-      const avatarUrl =
-        avatar && typeof avatar === "object"
-          ? String(
-              (avatar as Record<string, unknown>).avatar_origin ||
-                (avatar as Record<string, unknown>).avatar_url ||
-                ""
-            )
-          : "";
-
-      return {
-        id: `chat:${chatId}`,
-        type: "group" as const,
-        title: String(meta.name || chatId),
-        subtitle: String(meta.description || meta.chat_mode || ""),
-        avatarUrl: avatarUrl || undefined,
-        chatId,
-      };
-    })
-    .filter((item) => item.chatId);
+  const items = (data.items || []).map(normalizeChatConversation).filter((item) => item.chatId);
 
   return { items };
+}
+
+async function listChats(): Promise<ConversationListResult> {
+  const { brand, accessToken, scope } = getAuthContext();
+  ensureScopes(scope, ["im:chat:read"]);
+  const chats = await collectPagedItems((pageToken) =>
+    callOpenApiWithRefresh<{
+      items?: Array<Record<string, unknown>>;
+      has_more?: boolean;
+      page_token?: string;
+    }>({
+      brand,
+      accessToken,
+      method: "GET",
+      apiPath: "/open-apis/im/v1/chats",
+      query: {
+        page_size: 100,
+        page_token: pageToken,
+      },
+    })
+  );
+
+  const deduped = new Map<string, ReturnType<typeof normalizeChatConversation>>();
+  chats
+    .map(normalizeChatConversation)
+    .filter((item) => item.chatId || item.userOpenId)
+    .forEach((item) => {
+      deduped.set(item.id, item);
+    });
+
+  return { items: Array.from(deduped.values()) };
 }
 
 async function resolveP2PChat(userOpenId: string) {
@@ -550,6 +649,61 @@ function createWindow() {
   mainWindow = win;
 }
 
+function createMessagesWindow() {
+  if (messagesWindow && !messagesWindow.isDestroyed()) {
+    if (messagesWindow.isMinimized()) {
+      messagesWindow.restore();
+    }
+    messagesWindow.focus();
+    return messagesWindow;
+  }
+
+  const preloadPath = path.join(__dirname, "preload.js");
+  const win = new BrowserWindow({
+    width: 1320,
+    height: 860,
+    minWidth: 980,
+    minHeight: 680,
+    title: "消息",
+    parent: mainWindow ?? undefined,
+    autoHideMenuBar: true,
+    ...getSharedWindowChromeOptions(),
+    webPreferences: {
+      preload: preloadPath,
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  win.on("page-title-updated", (e) => {
+    e.preventDefault();
+  });
+
+  win.on("closed", () => {
+    messagesWindow = null;
+  });
+
+  if (!app.isPackaged) {
+    void win.loadURL(getRendererEntryUrl("?messages-window=1"));
+  } else {
+    void win.loadFile(getRendererEntryUrl(), { search: "?messages-window=1" });
+    win.webContents.on("devtools-opened", () => {
+      win.webContents.closeDevTools();
+    });
+    win.webContents.on("before-input-event", (event, input) => {
+      if (
+        input.key === "F12" ||
+        ((input.control || input.meta) && input.shift && input.key.toLowerCase() === "i")
+      ) {
+        event.preventDefault();
+      }
+    });
+  }
+
+  messagesWindow = win;
+  return win;
+}
+
 function getRendererEntryUrl(search = "") {
   if (!app.isPackaged) {
     return `http://127.0.0.1:5173/${search}`;
@@ -664,6 +818,11 @@ ipcMain.handle("window:setTitleBarOverlay", (event, opts) => {
   win.setTitleBarOverlay({ color, symbolColor, height });
 });
 
+ipcMain.handle("window:openMessagesWindow", () => {
+  createMessagesWindow();
+  return { success: true };
+});
+
 // ── 初始化状态 IPC ──
 ipcMain.handle("config:getInitStatus", () => {
   return tokenStore.getInitStatus();
@@ -707,6 +866,14 @@ ipcMain.handle("shell:openExternal", (_event, url) => {
 });
 
 // ── 消息 / 联系人读取 IPC ──
+ipcMain.handle("messages:listContacts", () => {
+  return listContacts();
+});
+
+ipcMain.handle("messages:listChats", () => {
+  return listChats();
+});
+
 ipcMain.handle("messages:searchUsers", (_event, query: string) => {
   return searchUsers(String(query || "").trim());
 });
