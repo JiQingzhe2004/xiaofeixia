@@ -41,6 +41,16 @@ function MainApp() {
     checkInit();
   }, []);
 
+  async function handleLogout() {
+    try {
+      await window.configBridge?.clearConfig();
+    } finally {
+      setUserName("");
+      setAvatarUrl("");
+      setAppState("setup");
+    }
+  }
+
   if (appState === null) {
     return (
       <>
@@ -73,5 +83,5 @@ function MainApp() {
     );
   }
 
-  return <MainPage userName={userName} avatarUrl={avatarUrl} />;
+  return <MainPage userName={userName} avatarUrl={avatarUrl} onLogout={handleLogout} />;
 }

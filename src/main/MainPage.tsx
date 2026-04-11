@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   Avatar,
   Box,
+  Button,
   IconButton,
   List,
   ListItemButton,
@@ -15,6 +16,7 @@ import {
   BadgeInfo,
   ChevronRight,
   Home,
+  LogOut,
   MessageCircle,
   Settings,
 } from "lucide-react";
@@ -35,9 +37,10 @@ const navItems = [
 interface Props {
   userName?: string;
   avatarUrl?: string;
+  onLogout?: () => void | Promise<void>;
 }
 
-export default function MainPage({ userName, avatarUrl }: Props) {
+export default function MainPage({ userName, avatarUrl, onLogout }: Props) {
   const [collapsed, setCollapsed] = useState(false);
   const version = `v${packageJson.version}`;
   const displayName = userName?.trim() || "你";
@@ -209,19 +212,20 @@ export default function MainPage({ userName, avatarUrl }: Props) {
             <Box
               sx={{
                 px: collapsed ? 1 : 1.5,
-                py: 1.5,
+                py: collapsed ? 1.5 : 1.25,
                 display: "flex",
+                flexDirection: collapsed ? "column" : "row",
                 alignItems: "center",
                 justifyContent: "center",
-                gap: collapsed ? 0 : 1.25,
+                gap: collapsed ? 1 : 1.25,
               }}
             >
               <Avatar
                 src={avatarUrl || feizhuIcon}
                 alt={avatarUrl ? `${displayName} 的头像` : "肥猪头像回退图"}
                 sx={{
-                  width: 45,
-                  height: 45,
+                  width: 40,
+                  height: 40,
                   flexShrink: 0,
                   border: "1px solid",
                   borderColor: "divider",
@@ -247,6 +251,56 @@ export default function MainPage({ userName, avatarUrl }: Props) {
                 >
                   {displayName}
                 </Typography>
+              )}
+            </Box>
+
+            <Box
+              sx={{
+                px: collapsed ? 1 : 1.5,
+                pb: 1.5,
+                display: "flex",
+                justifyContent: "center",
+              }}
+            >
+              {collapsed ? (
+                <Tooltip title="退出登录" placement="right">
+                  <IconButton
+                    onClick={() => void onLogout?.()}
+                    size="small"
+                    sx={{
+                      color: "error.main",
+                      WebkitAppRegion: "no-drag",
+                      "&:hover": {
+                        bgcolor: "error.main",
+                        color: "error.contrastText",
+                      },
+                    }}
+                  >
+                    <LogOut size={16} />
+                  </IconButton>
+                </Tooltip>
+              ) : (
+                <Button
+                  onClick={() => void onLogout?.()}
+                  size="small"
+                  startIcon={<LogOut size={16} />}
+                  sx={{
+                    minHeight: 32,
+                    px: 1.5,
+                    borderRadius: 999,
+                    color: "error.main",
+                    textTransform: "none",
+                    fontSize: "0.85rem",
+                    fontWeight: 600,
+                    WebkitAppRegion: "no-drag",
+                    "&:hover": {
+                      bgcolor: "error.main",
+                      color: "error.contrastText",
+                    },
+                  }}
+                >
+                  退出登录
+                </Button>
               )}
             </Box>
 
