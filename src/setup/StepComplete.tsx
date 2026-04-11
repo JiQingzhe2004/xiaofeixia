@@ -45,7 +45,7 @@ export default function StepComplete({ userInfo, onFinish }: Props) {
       )}
 
       <Typography sx={{ mb: 5, color: "text.secondary", maxWidth: 520 }}>
-        一切就绪，现在可以开始使用肥猪了。
+        一切就绪，现在可以做一只快乐的小猪了🐽。
       </Typography>
 
       <Button
