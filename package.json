@@ -8,11 +8,37 @@
   "main": "electron-dist/main.js",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json --watch --preserveWatchOutput\" \"node scripts/dev-electron.cjs\"",
-    "build": "tsc -p tsconfig.electron.json && vite build",
+    "build:app": "tsc -p tsconfig.electron.json && vite build",
+    "build": "npm run build:app",
+    "pack:win": "npm run build:app && npx electron-builder --win",
+    "pack:mac": "npm run build:app && npx electron-builder --mac",
     "preview": "vite preview",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "build": {
+    "appId": "com.feizhu.app",
+    "productName": "肥猪",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "icon": "resources/icons/icon.ico",
+      "target": ["nsis"]
+    },
+    "mac": {
+      "icon": "resources/icons/icon.icns",
+      "target": ["dmg"]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "differentialPackage": false
+    },
+    "dmg": {
+      "writeUpdateInfo": false
+    },
     "electronLanguages": ["zh-CN", "en-US"]
   },
   "dependencies": {
