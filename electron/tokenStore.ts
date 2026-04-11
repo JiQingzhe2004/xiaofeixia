@@ -14,6 +14,9 @@ export interface AppConfig {
   clientSecret: string;
   brand: string;
   userInfo?: Record<string, unknown>;
+  uiPreferences?: {
+    themeMode?: "system" | "light" | "dark";
+  };
   createdAt?: string;
 }
 
@@ -44,6 +47,7 @@ function ensureDb(): DatabaseSync {
       client_secret TEXT NOT NULL,
       brand TEXT NOT NULL,
       user_info_json TEXT,
+      ui_preferences_json TEXT,
       created_at TEXT
     );
 
@@ -58,8 +62,22 @@ function ensureDb(): DatabaseSync {
       login_at TEXT
     );
   `);
+  ensureColumn(db, "app_config", "ui_preferences_json", "TEXT");
 
   return db;
+}
+
+function ensureColumn(
+  database: DatabaseSync,
+  tableName: string,
+  columnName: string,
+  columnDefinition: string
+) {
+  const columns = database.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{
+    name: string;
+  }>;
+  if (columns.some((column) => column.name === columnName)) return;
+  database.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`);
 }
 
 function parseJson<T>(value: unknown): T | undefined {
@@ -81,22 +99,27 @@ export function saveAppConfig(data: {
   clientSecret: string;
   brand: string;
   userInfo?: Record<string, unknown>;
+  uiPreferences?: {
+    themeMode?: "system" | "light" | "dark";
+  };
 }): void {
   const database = ensureDb();
   database.prepare(`
-    INSERT INTO app_config (id, client_id, client_secret, brand, user_info_json, created_at)
-    VALUES (1, ?, ?, ?, ?, ?)
+    INSERT INTO app_config (id, client_id, client_secret, brand, user_info_json, ui_preferences_json, created_at)
+    VALUES (1, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       client_id = excluded.client_id,
       client_secret = excluded.client_secret,
       brand = excluded.brand,
       user_info_json = excluded.user_info_json,
+      ui_preferences_json = excluded.ui_preferences_json,
       created_at = excluded.created_at
   `).run(
     data.clientId,
     data.clientSecret,
     data.brand,
     stringifyJson(data.userInfo),
+    stringifyJson(data.uiPreferences),
     new Date().toISOString()
   );
 }
@@ -136,7 +159,7 @@ export function saveUserToken(data: {
 
 export function getAppConfig(): AppConfig | null {
   const row = ensureDb().prepare(`
-    SELECT client_id, client_secret, brand, user_info_json, created_at
+    SELECT client_id, client_secret, brand, user_info_json, ui_preferences_json, created_at
     FROM app_config
     WHERE id = 1
   `).get() as
@@ -145,6 +168,7 @@ export function getAppConfig(): AppConfig | null {
         client_secret: string;
         brand: string;
         user_info_json: string | null;
+        ui_preferences_json: string | null;
         created_at: string | null;
       }
     | undefined;
@@ -156,8 +180,35 @@ export function getAppConfig(): AppConfig | null {
     clientSecret: row.client_secret,
     brand: row.brand,
     userInfo: parseJson<Record<string, unknown>>(row.user_info_json),
+    uiPreferences: parseJson<{ themeMode?: "system" | "light" | "dark" }>(
+      row.ui_preferences_json
+    ),
     createdAt: row.created_at ?? undefined,
   };
+}
+
+export function saveUiPreferences(data: { themeMode?: "system" | "light" | "dark" }): void {
+  const database = ensureDb();
+  const existing = getAppConfig();
+  database.prepare(`
+    INSERT INTO app_config (
+      id, client_id, client_secret, brand, user_info_json, ui_preferences_json, created_at
+    )
+    VALUES (1, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      ui_preferences_json = excluded.ui_preferences_json
+  `).run(
+    existing?.clientId ?? "",
+    existing?.clientSecret ?? "",
+    existing?.brand ?? "feishu",
+    stringifyJson(existing?.userInfo),
+    stringifyJson(data),
+    existing?.createdAt ?? new Date().toISOString()
+  );
+}
+
+export function getUiPreferences() {
+  return getAppConfig()?.uiPreferences ?? {};
 }
 
 export function getUserToken(): UserToken | null {

@@ -20,6 +20,11 @@ contextBridge.exposeInMainWorld("configBridge", {
     ipcRenderer.invoke("config:saveUserToken", tokenData),
   /** 获取应用配置 */
   getAppConfig: () => ipcRenderer.invoke("config:getAppConfig"),
+  /** 获取界面偏好 */
+  getUiPreferences: () => ipcRenderer.invoke("config:getUiPreferences"),
+  /** 保存界面偏好 */
+  saveUiPreferences: (preferences: Record<string, unknown>) =>
+    ipcRenderer.invoke("config:saveUiPreferences", preferences),
   /** 清空所有配置 */
   clearConfig: () => ipcRenderer.invoke("config:clearConfig"),
 });
@@ -27,6 +32,18 @@ contextBridge.exposeInMainWorld("configBridge", {
 contextBridge.exposeInMainWorld("shellBridge", {
   /** 用系统默认浏览器打开外部链接 */
   openExternal: (url: string) => ipcRenderer.invoke("shell:openExternal", url),
+});
+
+contextBridge.exposeInMainWorld("messagesBridge", {
+  searchUsers: (query: string) => ipcRenderer.invoke("messages:searchUsers", query),
+  searchChats: (query: string) => ipcRenderer.invoke("messages:searchChats", query),
+  resolveP2PChat: (userOpenId: string) => ipcRenderer.invoke("messages:resolveP2PChat", userOpenId),
+  listChatMessages: (params: {
+    chatId: string;
+    pageToken?: string;
+    pageSize?: number;
+    sort?: "asc" | "desc";
+  }) => ipcRenderer.invoke("messages:listChatMessages", params),
 });
 
 contextBridge.exposeInMainWorld("authBridge", {

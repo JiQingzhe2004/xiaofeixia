@@ -7,7 +7,7 @@
   "type": "commonjs",
   "main": "electron-dist/main.js",
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json --watch --preserveWatchOutput\" \"wait-on http://127.0.0.1:5173 electron-dist/main.js && electron .\"",
+    "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json --watch --preserveWatchOutput\" \"node scripts/dev-electron.cjs\"",
     "build": "tsc -p tsconfig.electron.json && vite build",
     "preview": "vite preview",
     "test": "echo \"Error: no test specified\" && exit 1"

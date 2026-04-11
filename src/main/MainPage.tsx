@@ -24,24 +24,29 @@ import { TITLEBAR_HEIGHT, WindowDragRegion } from "../components/windowChrome";
 import feizhuLogo from "../../resources/icons/feizhu.png";
 import feizhuIcon from "../../resources/icons/Avatar.png";
 import packageJson from "../../package.json";
+import MessagesPage from "../messages/MessagesPage";
+import SettingsPage from "../settings/SettingsPage";
 
 const SIDEBAR_EXPANDED_WIDTH = 248;
 const SIDEBAR_COLLAPSED_WIDTH = 76;
+type MainSection = "home" | "messages" | "settings";
 
 const navItems = [
-  { label: "首页", icon: Home },
-  { label: "消息", icon: MessageCircle },
-  { label: "设置", icon: Settings },
+  { id: "home" as MainSection, label: "首页", icon: Home },
+  { id: "messages" as MainSection, label: "消息", icon: MessageCircle },
+  { id: "settings" as MainSection, label: "设置", icon: Settings },
 ];
 
 interface Props {
   userName?: string;
   avatarUrl?: string;
   onLogout?: () => void | Promise<void>;
+  onReauthorized?: () => void | Promise<void>;
 }
 
-export default function MainPage({ userName, avatarUrl, onLogout }: Props) {
+export default function MainPage({ userName, avatarUrl, onLogout, onReauthorized }: Props) {
   const [collapsed, setCollapsed] = useState(false);
+  const [activeSection, setActiveSection] = useState<MainSection>("home");
   const version = `v${packageJson.version}`;
   const displayName = userName?.trim() || "你";
 
@@ -50,18 +55,19 @@ export default function MainPage({ userName, avatarUrl, onLogout }: Props) {
       <WindowDragRegion />
       <Box
         sx={{
-          minHeight: "100vh",
+          height: "100vh",
           pt: window.appWindow?.customTitleBar ? `${TITLEBAR_HEIGHT}px` : 0,
+          boxSizing: "border-box",
           bgcolor: "background.default",
           WebkitAppRegion: "no-drag",
+          overflow: "hidden",
         }}
       >
         <Box
           sx={{
             display: "flex",
-            minHeight: window.appWindow?.customTitleBar
-              ? `calc(100vh - ${TITLEBAR_HEIGHT}px)`
-              : "100vh",
+            height: "100%",
+            minHeight: 0,
           }}
         >
           <Paper
@@ -80,6 +86,8 @@ export default function MainPage({ userName, avatarUrl, onLogout }: Props) {
               overflow: "visible",
               display: "flex",
               flexDirection: "column",
+              height: "100%",
+              minHeight: 0,
               zIndex: 2,
               WebkitAppRegion: "no-drag",
             }}
@@ -163,7 +171,16 @@ export default function MainPage({ userName, avatarUrl, onLogout }: Props) {
               }}
             />
 
-            <List sx={{ px: 1, py: 1, flex: 1 }}>
+            <List
+              sx={{
+                px: 1,
+                py: 1,
+                flex: 1,
+                minHeight: 0,
+                overflowY: "auto",
+                overflowX: "hidden",
+              }}
+            >
               {navItems.map((item) => {
                 const Icon = item.icon;
                 return (
@@ -174,7 +191,8 @@ export default function MainPage({ userName, avatarUrl, onLogout }: Props) {
                     disableHoverListener={!collapsed}
                   >
                     <ListItemButton
-                      selected={item.label === "首页"}
+                      selected={item.id === activeSection}
+                      onClick={() => setActiveSection(item.id)}
                       sx={{
                         mb: 0.5,
                         minHeight: 44,
@@ -347,106 +365,137 @@ export default function MainPage({ userName, avatarUrl, onLogout }: Props) {
             sx={{
               flex: 1,
               minWidth: 0,
+              minHeight: 0,
               bgcolor: "background.default",
               display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              px: 4,
+              alignItems:
+                activeSection === "home" ? "center" : "stretch",
+              justifyContent:
+                activeSection === "home" ? "center" : "stretch",
+              overflow: "hidden",
               WebkitAppRegion: "no-drag",
             }}
           >
-            <Box
-              sx={{
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                textAlign: "center",
-                gap: 2,
-                transform: "translateY(-4%)",
-              }}
-            >
+            {activeSection === "home" && (
               <Box
-                component="img"
-                src={feizhuLogo}
-                alt="肥猪 logo"
                 sx={{
-                  width: 200,
-                  height: 200,
-                  objectFit: "contain",
-                  animation: "main-pig-wobble 3.6s ease-in-out infinite",
-                  transformOrigin: "center bottom",
-                  userSelect: "none",
-                  pointerEvents: "none",
-                  "@keyframes main-pig-wobble": {
-                    "0%": {
-                      transform: "rotate(0deg) translateY(0)",
-                    },
-                    "18%": {
-                      transform: "rotate(-4deg) translateY(-2px)",
-                    },
-                    "36%": {
-                      transform: "rotate(4deg) translateY(0)",
-                    },
-                    "54%": {
-                      transform: "rotate(-3deg) translateY(-1px)",
-                    },
-                    "72%": {
-                      transform: "rotate(3deg) translateY(0)",
-                    },
-                    "100%": {
-                      transform: "rotate(0deg) translateY(0)",
-                    },
-                  },
-                }}
-              />
-
-              <Typography
-                variant="h4"
-                sx={{
-                  fontWeight: 700,
-                  color: "text.primary",
-                  fontSize: { xs: "1.3rem", sm: "1.65rem" },
-                  letterSpacing: "-0.02em",
-                  lineHeight: 1.5,
+                  flex: 1,
+                  minHeight: 0,
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  textAlign: "center",
+                  gap: 2,
+                  px: 4,
+                  overflowY: "auto",
+                  transform: "translateY(-4%)",
                 }}
               >
-                可爱的
                 <Box
-                  component="span"
+                  component="img"
+                  src={feizhuLogo}
+                  alt="肥猪 logo"
                   sx={{
-                    display: "inline-block",
-                    mx: 0.35,
-                    fontFamily: "inherit",
-                    fontWeight: 800,
-                    letterSpacing: "0.01em",
-                    background:
-                      "linear-gradient(135deg, #ffb36b 0%, #ff7a59 55%, #ff5f8f 100%)",
-                    backgroundClip: "text",
-                    WebkitBackgroundClip: "text",
-                    color: "transparent",
-                    WebkitTextFillColor: "transparent",
-                    textShadow: "0 1px 8px rgba(255,122,89,0.1)",
-                    position: "relative",
-                    "&::after": {
-                      content: '""',
-                      position: "absolute",
-                      left: "6%",
-                      right: "6%",
-                      bottom: "0.08em",
-                      height: "0.18em",
-                      borderRadius: "999px",
-                      background:
-                        "linear-gradient(135deg, rgba(255,179,107,0.28) 0%, rgba(255,95,143,0.2) 100%)",
-                      zIndex: -1,
+                    width: 200,
+                    height: 200,
+                    objectFit: "contain",
+                    animation: "main-pig-wobble 3.6s ease-in-out infinite",
+                    transformOrigin: "center bottom",
+                    userSelect: "none",
+                    pointerEvents: "none",
+                    "@keyframes main-pig-wobble": {
+                      "0%": {
+                        transform: "rotate(0deg) translateY(0)",
+                      },
+                      "18%": {
+                        transform: "rotate(-4deg) translateY(-2px)",
+                      },
+                      "36%": {
+                        transform: "rotate(4deg) translateY(0)",
+                      },
+                      "54%": {
+                        transform: "rotate(-3deg) translateY(-1px)",
+                      },
+                      "72%": {
+                        transform: "rotate(3deg) translateY(0)",
+                      },
+                      "100%": {
+                        transform: "rotate(0deg) translateY(0)",
+                      },
                     },
                   }}
+                />
+
+                <Typography
+                  variant="h4"
+                  sx={{
+                    fontWeight: 700,
+                    color: "text.primary",
+                    fontSize: { xs: "1.3rem", sm: "1.65rem" },
+                    letterSpacing: "-0.02em",
+                    lineHeight: 1.5,
+                  }}
                 >
-                  {displayName}
-                </Box>
-                小猪，准备好探险了吗？
-              </Typography>
-            </Box>
+                  可爱的
+                  <Box
+                    component="span"
+                    sx={{
+                      display: "inline-block",
+                      mx: 0.35,
+                      fontFamily: "inherit",
+                      fontWeight: 800,
+                      letterSpacing: "0.01em",
+                      background:
+                        "linear-gradient(135deg, #ffb36b 0%, #ff7a59 55%, #ff5f8f 100%)",
+                      backgroundClip: "text",
+                      WebkitBackgroundClip: "text",
+                      color: "transparent",
+                      WebkitTextFillColor: "transparent",
+                      textShadow: "0 1px 8px rgba(255,122,89,0.1)",
+                      position: "relative",
+                      "&::after": {
+                        content: '""',
+                        position: "absolute",
+                        left: "6%",
+                        right: "6%",
+                        bottom: "0.08em",
+                        height: "0.18em",
+                        borderRadius: "999px",
+                        background:
+                          "linear-gradient(135deg, rgba(255,179,107,0.28) 0%, rgba(255,95,143,0.2) 100%)",
+                        zIndex: -1,
+                      },
+                    }}
+                  >
+                    {displayName}
+                  </Box>
+                  小猪，准备好探险了吗？
+                </Typography>
+              </Box>
+            )}
+
+            {activeSection === "messages" && (
+              <Box sx={{ flex: 1, minWidth: 0, minHeight: 0, height: "100%" }}>
+                <MessagesPage />
+              </Box>
+            )}
+
+            {activeSection === "settings" && (
+              <Box
+                sx={{
+                  flex: 1,
+                  minWidth: 0,
+                  minHeight: 0,
+                  height: "100%",
+                  overflowY: "auto",
+                  px: 3,
+                  py: 3,
+                }}
+              >
+                <SettingsPage onReauthorized={onReauthorized} />
+              </Box>
+            )}
           </Box>
         </Box>
       </Box>

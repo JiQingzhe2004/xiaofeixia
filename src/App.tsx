@@ -23,23 +23,24 @@ function MainApp() {
   const [avatarUrl, setAvatarUrl] = useState<string>("");
 
   useEffect(() => {
-    async function checkInit() {
-      try {
-        if (window.configBridge) {
-          const status = await window.configBridge.getInitStatus();
-          setUserName(status.user?.userInfo?.name || "");
-          setAvatarUrl(status.user?.userInfo?.avatarUrl || "");
-          setAppState(status.hasApp && status.hasUser ? "main" : "setup");
-        } else {
-          // 纯浏览器开发环境
-          setAppState("setup");
-        }
-      } catch {
+    void loadInitStatus();
+  }, []);
+
+  async function loadInitStatus() {
+    try {
+      if (window.configBridge) {
+        const status = await window.configBridge.getInitStatus();
+        setUserName(status.user?.userInfo?.name || "");
+        setAvatarUrl(status.user?.userInfo?.avatarUrl || "");
+        setAppState(status.hasApp && status.hasUser ? "main" : "setup");
+      } else {
+        // 纯浏览器开发环境
         setAppState("setup");
       }
+    } catch {
+      setAppState("setup");
     }
-    checkInit();
-  }, []);
+  }
 
   async function handleLogout() {
     try {
@@ -78,10 +79,17 @@ function MainApp() {
     return (
       <>
         <WindowDragRegion />
-        <SetupPage onSetupComplete={() => setAppState("main")} />
+        <SetupPage onSetupComplete={() => void loadInitStatus()} />
       </>
     );
   }
 
-  return <MainPage userName={userName} avatarUrl={avatarUrl} onLogout={handleLogout} />;
+  return (
+    <MainPage
+      userName={userName}
+      avatarUrl={avatarUrl}
+      onLogout={handleLogout}
+      onReauthorized={() => void loadInitStatus()}
+    />
+  );
 }
