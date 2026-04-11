@@ -4,6 +4,7 @@ import {
   ThemeProvider,
   createTheme,
   CssBaseline,
+  GlobalStyles,
   useMediaQuery,
 } from "@mui/material";
 import "@fontsource/roboto/300.css";
@@ -27,6 +28,14 @@ function Root() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline enableColorScheme />
+      <GlobalStyles
+        styles={{
+          img: {
+            WebkitUserDrag: "none",
+            userSelect: "none",
+          },
+        }}
+      />
       <NoticeProvider>
         <TitleBarSync />
         <App />

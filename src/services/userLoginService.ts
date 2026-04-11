@@ -29,6 +29,7 @@ export interface TokenResult {
 export interface UserInfo {
   openId: string;
   name: string;
+  avatarUrl?: string;
 }
 
 export interface LoginPollStatusEvent {
@@ -112,6 +113,10 @@ export async function fetchUserInfo(
   return {
     openId: String(data.open_id || ""),
     name: String(data.name || ""),
+    avatarUrl:
+      typeof data.avatar_url === "string" && data.avatar_url.length > 0
+        ? data.avatar_url
+        : undefined,
   };
 }
 

@@ -3,28 +3,7 @@ import { Box, CircularProgress, Typography } from "@mui/material";
 import { WindowDragRegion, TITLEBAR_HEIGHT } from "./components/windowChrome";
 import SetupPage from "./setup/SetupPage";
 import AuthWindowPage from "./auth/AuthWindowPage";
-
-/** 主页面占位 — 初始化完成后显示 */
-function MainPage() {
-  return (
-    <>
-      <WindowDragRegion />
-      <Box
-        sx={{
-          pt: window.appWindow?.customTitleBar ? `${TITLEBAR_HEIGHT}px` : 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          minHeight: "100vh",
-        }}
-      >
-        <Typography variant="h5" color="text.secondary" fontWeight={600}>
-          🎉 主界面开发中…
-        </Typography>
-      </Box>
-    </>
-  );
-}
+import MainPage from "./main/MainPage";
 
 export default function App() {
   const searchParams = new URLSearchParams(window.location.search);
@@ -40,12 +19,16 @@ export default function App() {
 function MainApp() {
   // null: 检查中, "setup": 需要初始化, "main": 已初始化
   const [appState, setAppState] = useState<"setup" | "main" | null>(null);
+  const [userName, setUserName] = useState<string>("");
+  const [avatarUrl, setAvatarUrl] = useState<string>("");
 
   useEffect(() => {
     async function checkInit() {
       try {
         if (window.configBridge) {
           const status = await window.configBridge.getInitStatus();
+          setUserName(status.user?.userInfo?.name || "");
+          setAvatarUrl(status.user?.userInfo?.avatarUrl || "");
           setAppState(status.hasApp && status.hasUser ? "main" : "setup");
         } else {
           // 纯浏览器开发环境
@@ -90,5 +73,5 @@ function MainApp() {
     );
   }
 
-  return <MainPage />;
+  return <MainPage userName={userName} avatarUrl={avatarUrl} />;
 }

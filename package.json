@@ -12,6 +12,9 @@
     "preview": "vite preview",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "build": {
+    "electronLanguages": ["zh-CN", "en-US"]
+  },
   "dependencies": {
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.0",

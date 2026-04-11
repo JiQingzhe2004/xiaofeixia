@@ -31,7 +31,7 @@ interface ConfigBridge {
     expiresIn?: number;
     refreshTokenExpiresIn?: number;
     scope?: string;
-    userInfo?: { openId?: string; name?: string };
+    userInfo?: { openId?: string; name?: string; avatarUrl?: string };
   }) => Promise<{ success: boolean }>;
   getAppConfig: () => Promise<AppConfig | null>;
   clearConfig: () => Promise<{ success: boolean }>;
@@ -83,7 +83,7 @@ interface UserToken {
   expiresIn?: number;
   refreshTokenExpiresIn?: number;
   scope?: string;
-  userInfo?: { openId?: string; name?: string };
+  userInfo?: { openId?: string; name?: string; avatarUrl?: string };
   loginAt?: string;
 }
 

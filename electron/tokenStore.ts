@@ -3,13 +3,11 @@
  * 使用 SQLite 单文件数据库保存在 Electron userData 目录
  */
 
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { app } from "electron";
 
 const DB_FILE = "feizhu.db";
-const LEGACY_CONFIG_FILE = "feizhu-config.json";
 
 export interface AppConfig {
   clientId: string;
@@ -25,23 +23,14 @@ export interface UserToken {
   expiresIn?: number;
   refreshTokenExpiresIn?: number;
   scope?: string;
-  userInfo?: { openId?: string; name?: string };
+  userInfo?: { openId?: string; name?: string; avatarUrl?: string };
   loginAt?: string;
-}
-
-interface LegacyConfig {
-  app?: AppConfig;
-  user?: UserToken;
 }
 
 let db: DatabaseSync | null = null;
 
 function getDbPath(): string {
   return path.join(app.getPath("userData"), DB_FILE);
-}
-
-function getLegacyConfigPath(): string {
-  return path.join(app.getPath("userData"), LEGACY_CONFIG_FILE);
 }
 
 function ensureDb(): DatabaseSync {
@@ -70,7 +59,6 @@ function ensureDb(): DatabaseSync {
     );
   `);
 
-  migrateLegacyJsonIfNeeded(db);
   return db;
 }
 
@@ -86,95 +74,6 @@ function parseJson<T>(value: unknown): T | undefined {
 function stringifyJson(value: unknown): string | null {
   if (value == null) return null;
   return JSON.stringify(value);
-}
-
-function hasAnyStoredData(database: DatabaseSync): boolean {
-  const appRow = database
-    .prepare("SELECT 1 AS present FROM app_config WHERE id = 1 LIMIT 1")
-    .get() as { present?: number } | undefined;
-  const userRow = database
-    .prepare("SELECT 1 AS present FROM user_token WHERE id = 1 LIMIT 1")
-    .get() as { present?: number } | undefined;
-  return !!appRow?.present || !!userRow?.present;
-}
-
-function loadLegacyConfig(): LegacyConfig {
-  try {
-    const filePath = getLegacyConfigPath();
-    if (!fs.existsSync(filePath)) return {};
-    const raw = fs.readFileSync(filePath, "utf-8");
-    return JSON.parse(raw) as LegacyConfig;
-  } catch {
-    return {};
-  }
-}
-
-function migrateLegacyJsonIfNeeded(database: DatabaseSync): void {
-  if (hasAnyStoredData(database)) return;
-
-  const legacyPath = getLegacyConfigPath();
-  if (!fs.existsSync(legacyPath)) return;
-
-  const legacy = loadLegacyConfig();
-  const insertApp = database.prepare(`
-    INSERT INTO app_config (id, client_id, client_secret, brand, user_info_json, created_at)
-    VALUES (1, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      client_id = excluded.client_id,
-      client_secret = excluded.client_secret,
-      brand = excluded.brand,
-      user_info_json = excluded.user_info_json,
-      created_at = excluded.created_at
-  `);
-  const insertUser = database.prepare(`
-    INSERT INTO user_token (
-      id, access_token, refresh_token, expires_in, refresh_token_expires_in, scope, user_info_json, login_at
-    )
-    VALUES (1, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      access_token = excluded.access_token,
-      refresh_token = excluded.refresh_token,
-      expires_in = excluded.expires_in,
-      refresh_token_expires_in = excluded.refresh_token_expires_in,
-      scope = excluded.scope,
-      user_info_json = excluded.user_info_json,
-      login_at = excluded.login_at
-  `);
-
-  database.exec("BEGIN");
-  try {
-    if (legacy.app?.clientId) {
-      insertApp.run(
-        legacy.app.clientId,
-        legacy.app.clientSecret,
-        legacy.app.brand,
-        stringifyJson(legacy.app.userInfo),
-        legacy.app.createdAt || new Date().toISOString()
-      );
-    }
-
-    if (legacy.user?.accessToken) {
-      insertUser.run(
-        legacy.user.accessToken,
-        legacy.user.refreshToken ?? null,
-        legacy.user.expiresIn ?? null,
-        legacy.user.refreshTokenExpiresIn ?? null,
-        legacy.user.scope ?? null,
-        stringifyJson(legacy.user.userInfo),
-        legacy.user.loginAt || new Date().toISOString()
-      );
-    }
-    database.exec("COMMIT");
-  } catch (error) {
-    database.exec("ROLLBACK");
-    throw error;
-  }
-
-  try {
-    fs.renameSync(legacyPath, `${legacyPath}.migrated`);
-  } catch {
-    // 不阻断正常使用，旧文件保留即可
-  }
 }
 
 export function saveAppConfig(data: {
@@ -208,7 +107,7 @@ export function saveUserToken(data: {
   expiresIn?: number;
   refreshTokenExpiresIn?: number;
   scope?: string;
-  userInfo?: { openId?: string; name?: string };
+  userInfo?: { openId?: string; name?: string; avatarUrl?: string };
 }): void {
   const database = ensureDb();
   database.prepare(`
@@ -286,7 +185,7 @@ export function getUserToken(): UserToken | null {
     expiresIn: row.expires_in ?? undefined,
     refreshTokenExpiresIn: row.refresh_token_expires_in ?? undefined,
     scope: row.scope ?? undefined,
-    userInfo: parseJson<{ openId?: string; name?: string }>(row.user_info_json),
+    userInfo: parseJson<{ openId?: string; name?: string; avatarUrl?: string }>(row.user_info_json),
     loginAt: row.login_at ?? undefined,
   };
 }
