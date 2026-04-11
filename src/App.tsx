@@ -178,14 +178,22 @@ function MessagesWindowApp() {
       <Box
         sx={{
           height: "100vh",
-          pt: window.appWindow?.customTitleBar ? `${TITLEBAR_HEIGHT}px` : 0,
-          boxSizing: "border-box",
           bgcolor: "background.default",
-          WebkitAppRegion: "no-drag",
           overflow: "hidden",
         }}
       >
-        <MessagesPage />
+        <Box
+          sx={{
+            mt: window.appWindow?.customTitleBar ? `${TITLEBAR_HEIGHT}px` : 0,
+            height: window.appWindow?.customTitleBar
+              ? `calc(100% - ${TITLEBAR_HEIGHT}px)`
+              : "100%",
+            minHeight: 0,
+            WebkitAppRegion: "no-drag",
+          }}
+        >
+          <MessagesPage />
+        </Box>
       </Box>
     </>
   );

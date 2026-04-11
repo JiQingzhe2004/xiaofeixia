@@ -29,6 +29,7 @@ export function WindowDragRegion(props?: { title?: string }) {
   if (!window.appWindow?.customTitleBar) return null;
   return (
     <Box
+      className="app-drag-region"
       sx={{
         position: "fixed",
         top: 0,
@@ -42,7 +43,6 @@ export function WindowDragRegion(props?: { title?: string }) {
         borderBottom: "1px solid",
         borderColor: "divider",
         bgcolor: "background.default",
-        WebkitAppRegion: "drag",
       }}
     >
       <Typography
@@ -50,6 +50,7 @@ export function WindowDragRegion(props?: { title?: string }) {
         sx={{
           fontWeight: 700,
           userSelect: "none",
+          pointerEvents: "none",
           color: "text.primary",
           letterSpacing: "0.2em",
           opacity: 0.95,

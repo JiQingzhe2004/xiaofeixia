@@ -91,6 +91,16 @@ function Root() {
               WebkitUserDrag: "none",
               userSelect: "none",
             },
+            ".app-drag-region": {
+              userSelect: "none",
+              WebkitUserSelect: "none",
+              "-webkit-app-region": "drag",
+              "app-region": "drag",
+            },
+            ".app-no-drag-region": {
+              "-webkit-app-region": "no-drag",
+              "app-region": "no-drag",
+            },
             "*": {
               scrollbarWidth: "thin",
               scrollbarColor: `${thumbColor} transparent`,

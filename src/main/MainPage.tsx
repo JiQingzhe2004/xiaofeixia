@@ -56,17 +56,17 @@ export default function MainPage({ userName, avatarUrl, onLogout, onReauthorized
       <Box
         sx={{
           height: "100vh",
-          pt: window.appWindow?.customTitleBar ? `${TITLEBAR_HEIGHT}px` : 0,
-          boxSizing: "border-box",
           bgcolor: "background.default",
-          WebkitAppRegion: "no-drag",
           overflow: "hidden",
         }}
       >
         <Box
           sx={{
             display: "flex",
-            height: "100%",
+            mt: window.appWindow?.customTitleBar ? `${TITLEBAR_HEIGHT}px` : 0,
+            height: window.appWindow?.customTitleBar
+              ? `calc(100% - ${TITLEBAR_HEIGHT}px)`
+              : "100%",
             minHeight: 0,
           }}
         >

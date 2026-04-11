@@ -45,7 +45,7 @@ type MessageRecord = {
   createTime: string;
 };
 
-function EmptyState(props: { title: string; description: string }) {
+function EmptyState(props: { title: string; description: string; action?: React.ReactNode }) {
   return (
     <Stack
       spacing={1}
@@ -60,6 +60,7 @@ function EmptyState(props: { title: string; description: string }) {
         {props.title}
       </Typography>
       <Typography variant="body2">{props.description}</Typography>
+      {props.action}
     </Stack>
   );
 }
@@ -99,6 +100,11 @@ export default function MessagesPage() {
   const [messages, setMessages] = useState<MessageRecord[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [messagesError, setMessagesError] = useState("");
+  const [messageHint, setMessageHint] = useState<{
+    title: string;
+    description: string;
+  } | null>(null);
+  const [p2pUnavailableMap, setP2pUnavailableMap] = useState<Record<string, boolean>>({});
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [messagesPageToken, setMessagesPageToken] = useState("");
 
@@ -202,6 +208,9 @@ export default function MessagesPage() {
     const isLoadMore = !!pageToken;
     setMessagesLoading(true);
     setMessagesError("");
+    if (!isLoadMore) {
+      setMessageHint(null);
+    }
 
     try {
       let chatId = conversation.chatId || "";
@@ -227,6 +236,12 @@ export default function MessagesPage() {
 
       const nextConversation = { ...conversation, chatId };
       setSelectedConversation(nextConversation);
+      setP2pUnavailableMap((current) => {
+        if (!current[conversation.id]) return current;
+        const next = { ...current };
+        delete next[conversation.id];
+        return next;
+      });
       setMessages((previous) =>
         isLoadMore ? [...previous, ...(response?.items || [])] : response?.items || []
       );
@@ -238,7 +253,23 @@ export default function MessagesPage() {
       }
       setHasMoreMessages(false);
       setMessagesPageToken("");
-      setMessagesError(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+
+      if (message.includes("尚未建立私聊会话")) {
+        setMessagesError("");
+        setMessageHint({
+          title: "暂未建立私聊会话",
+          description:
+            "这个联系人当前还没有可读取的私聊记录。先在飞书里和对方发起一次聊天，之后这里就能正常显示消息。",
+        });
+        setP2pUnavailableMap((current) => ({
+          ...current,
+          [conversation.id]: true,
+        }));
+      } else {
+        setMessagesError(message);
+        setMessageHint(null);
+      }
     } finally {
       setMessagesLoading(false);
     }
@@ -364,7 +395,9 @@ export default function MessagesPage() {
                       primary={item.title}
                       secondary={
                         browseMode === "contacts"
-                          ? item.subtitle || "联系人"
+                          ? p2pUnavailableMap[item.id]
+                            ? "尚未建立私聊会话"
+                            : item.subtitle || "联系人"
                           : item.subtitle || (item.type === "p2p" ? "私聊会话" : "群聊会话")
                       }
                       primaryTypographyProps={{ noWrap: true, fontWeight: 600 }}
@@ -466,6 +499,23 @@ export default function MessagesPage() {
                 <Alert severity="error" sx={{ m: 2.5 }}>
                   {messagesError}
                 </Alert>
+              ) : messageHint ? (
+                <Box sx={{ height: "100%", display: "flex" }}>
+                  <EmptyState
+                    title={messageHint.title}
+                    description={messageHint.description}
+                    action={
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={() => void loadMessages(currentConversation)}
+                        sx={{ mt: 1, textTransform: "none", borderRadius: 999 }}
+                      >
+                        重新检测
+                      </Button>
+                    }
+                  />
+                </Box>
               ) : messagesLoading && messages.length === 0 ? (
                 <Stack spacing={1.5} sx={{ p: 2.5 }}>
                   {Array.from({ length: 6 }).map((_, index) => (
