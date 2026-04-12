@@ -129,7 +129,7 @@ export default function StepLogin({
       )}
 
       <Typography sx={{ mb: 4, color: "text.secondary", maxWidth: 520, lineHeight: 1.7 }}>
-        点击下方按钮，浏览器将打开飞书登录页面。
+        点击下方按钮，浏览器将打开飞书登录页面，并一并申请消息、联系人相关授权。机器人会话能力仍取决于应用后台权限与事件订阅配置。
       </Typography>
 
       {!loginStarted && !loading && (

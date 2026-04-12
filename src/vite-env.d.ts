@@ -54,6 +54,7 @@ interface MessageConversationItem {
   avatarUrl?: string;
   chatId?: string;
   userOpenId?: string;
+  source: "user" | "bot" | "mixed";
 }
 
 interface MessageItem {
@@ -61,9 +62,37 @@ interface MessageItem {
   chatId: string;
   senderName?: string;
   senderAvatarUrl?: string;
+  senderOpenId?: string;
+  isSelf?: boolean;
   messageType: string;
   contentText: string;
   createTime: string;
+}
+
+interface RealtimeMessageItem {
+  eventType: "im.message.receive_v1";
+  messageId: string;
+  chatId: string;
+  chatType: string;
+  messageType: string;
+  contentText: string;
+  createTime: string;
+  senderOpenId?: string;
+}
+
+interface RealtimeConnectionStatus {
+  state: "disabled" | "connecting" | "connected" | "reconnecting" | "error";
+  message: string;
+  updatedAt: number;
+}
+
+interface RealtimeConversationChangedItem {
+  eventType: "im.chat.access_event.bot_p2p_chat_entered_v1";
+  chatId: string;
+  userOpenId: string;
+  title?: string;
+  avatarUrl?: string;
+  lastMessageAt?: number;
 }
 
 interface MessagesBridge {
@@ -72,12 +101,17 @@ interface MessagesBridge {
   searchUsers: (query: string) => Promise<{ items: MessageConversationItem[] }>;
   searchChats: (query: string) => Promise<{ items: MessageConversationItem[] }>;
   resolveP2PChat: (userOpenId: string) => Promise<{ chatId: string }>;
+  getRealtimeStatus: () => Promise<RealtimeConnectionStatus>;
   listChatMessages: (params: {
     chatId: string;
     pageToken?: string;
     pageSize?: number;
     sort?: "asc" | "desc";
+    identity?: "user" | "bot" | "auto";
   }) => Promise<{ items: MessageItem[]; hasMore: boolean; pageToken?: string }>;
+  onIncomingMessage: (callback: (payload: RealtimeMessageItem) => void) => () => void;
+  onConversationChanged: (callback: (payload: RealtimeConversationChangedItem) => void) => () => void;
+  onRealtimeStatusChange: (callback: (payload: RealtimeConnectionStatus) => void) => () => void;
 }
 
 interface AuthBridge {
@@ -86,7 +120,7 @@ interface AuthBridge {
     deviceCode: string,
     brand?: "feishu" | "lark"
   ) => Promise<Record<string, unknown>>;
-  openAuthWindow: (url: string) => Promise<{ success: boolean }>;
+  openAuthWindow: (url: string, title?: string) => Promise<{ success: boolean }>;
   closeAuthWindow: () => Promise<{ success: boolean; closed: boolean }>;
   onAuthWindowClosed: (callback: () => void) => () => void;
   beginDeviceAuth: (params: {

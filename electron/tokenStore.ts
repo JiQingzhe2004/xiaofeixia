@@ -30,6 +30,16 @@ export interface UserToken {
   loginAt?: string;
 }
 
+export interface BotRecentChat {
+  chatId: string;
+  userOpenId: string;
+  title?: string;
+  avatarUrl?: string;
+  lastMessagePreview?: string;
+  lastMessageAt?: number;
+  updatedAt?: string;
+}
+
 let db: DatabaseSync | null = null;
 
 function getDbPath(): string {
@@ -60,6 +70,16 @@ function ensureDb(): DatabaseSync {
       scope TEXT,
       user_info_json TEXT,
       login_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS bot_recent_chat (
+      chat_id TEXT PRIMARY KEY,
+      user_open_id TEXT NOT NULL,
+      title TEXT,
+      avatar_url TEXT,
+      last_message_preview TEXT,
+      last_message_at INTEGER,
+      updated_at TEXT
     );
   `);
   ensureColumn(db, "app_config", "ui_preferences_json", "TEXT");
@@ -252,12 +272,79 @@ export function getInitStatus() {
   };
 }
 
+export function saveBotRecentChat(data: {
+  chatId: string;
+  userOpenId: string;
+  title?: string;
+  avatarUrl?: string;
+  lastMessagePreview?: string;
+  lastMessageAt?: number;
+}): void {
+  const database = ensureDb();
+  database.prepare(`
+    INSERT INTO bot_recent_chat (
+      chat_id,
+      user_open_id,
+      title,
+      avatar_url,
+      last_message_preview,
+      last_message_at,
+      updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(chat_id) DO UPDATE SET
+      user_open_id = excluded.user_open_id,
+      title = COALESCE(excluded.title, bot_recent_chat.title),
+      avatar_url = COALESCE(excluded.avatar_url, bot_recent_chat.avatar_url),
+      last_message_preview = COALESCE(excluded.last_message_preview, bot_recent_chat.last_message_preview),
+      last_message_at = COALESCE(excluded.last_message_at, bot_recent_chat.last_message_at),
+      updated_at = excluded.updated_at
+  `).run(
+    data.chatId,
+    data.userOpenId,
+    data.title ?? null,
+    data.avatarUrl ?? null,
+    data.lastMessagePreview ?? null,
+    data.lastMessageAt ?? null,
+    new Date().toISOString()
+  );
+}
+
+export function getBotRecentChats(limit?: number): BotRecentChat[] {
+  const statement = ensureDb().prepare(`
+    SELECT chat_id, user_open_id, title, avatar_url, last_message_preview, last_message_at, updated_at
+    FROM bot_recent_chat
+    ORDER BY COALESCE(last_message_at, 0) DESC, updated_at DESC
+    ${limit ? "LIMIT ?" : ""}
+  `);
+  const rows = (limit ? statement.all(limit) : statement.all()) as Array<{
+    chat_id: string;
+    user_open_id: string;
+    title: string | null;
+    avatar_url: string | null;
+    last_message_preview: string | null;
+    last_message_at: number | null;
+    updated_at: string | null;
+  }>;
+
+  return rows.map((row) => ({
+    chatId: row.chat_id,
+    userOpenId: row.user_open_id,
+    title: row.title ?? undefined,
+    avatarUrl: row.avatar_url ?? undefined,
+    lastMessagePreview: row.last_message_preview ?? undefined,
+    lastMessageAt: row.last_message_at ?? undefined,
+    updatedAt: row.updated_at ?? undefined,
+  }));
+}
+
 export function clearConfig(): void {
   const database = ensureDb();
   database.exec("BEGIN");
   try {
     database.prepare("DELETE FROM app_config WHERE id = 1").run();
     database.prepare("DELETE FROM user_token WHERE id = 1").run();
+    database.prepare("DELETE FROM bot_recent_chat").run();
     database.exec("COMMIT");
   } catch (error) {
     database.exec("ROLLBACK");

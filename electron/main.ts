@@ -1,9 +1,11 @@
 import { app, BrowserWindow, Menu, WebContentsView, ipcMain, shell } from "electron";
 import * as path from "node:path";
+import * as Lark from "@larksuiteoapi/node-sdk";
 import * as tokenStore from "./tokenStore";
 
 const TITLEBAR_HEIGHT = 40;
 type Brand = "feishu" | "lark";
+type ConversationSource = "user" | "bot" | "mixed";
 type ConversationListResult = {
   items: Array<{
     id: string;
@@ -13,20 +15,52 @@ type ConversationListResult = {
     avatarUrl?: string;
     chatId?: string;
     userOpenId: string;
+    source: ConversationSource;
   }>;
 };
+type ConversationListItem = ConversationListResult["items"][number];
 type ListChatMessagesResult = {
   items: Array<{
     messageId: string;
     chatId: string;
     senderName?: string;
     senderAvatarUrl?: string;
+    senderOpenId?: string;
+    isSelf?: boolean;
     messageType: string;
     contentText: string;
     createTime: string;
   }>;
   hasMore: boolean;
   pageToken?: string;
+};
+type RealtimeIncomingMessagePayload = {
+  eventType: "im.message.receive_v1";
+  messageId: string;
+  chatId: string;
+  chatType: string;
+  messageType: string;
+  contentText: string;
+  createTime: string;
+  rawCreateTime?: string;
+  senderOpenId?: string;
+};
+type RealtimeConversationChangedPayload = {
+  eventType: "im.chat.access_event.bot_p2p_chat_entered_v1";
+  chatId: string;
+  userOpenId: string;
+  title?: string;
+  avatarUrl?: string;
+  lastMessageAt?: number;
+};
+type RealtimeConnectionStatus = {
+  state: "disabled" | "connecting" | "connected" | "reconnecting" | "error";
+  message: string;
+  updatedAt: number;
+};
+type UserProfileSummary = {
+  title: string;
+  avatarUrl?: string;
 };
 class FeishuApiError extends Error {
   code?: number;
@@ -44,6 +78,15 @@ let messagesWindow: BrowserWindow | null = null;
 let authWindow: BrowserWindow | null = null;
 let authView: WebContentsView | null = null;
 let suppressAuthWindowClosedEvent = false;
+let messageWsClient: Lark.WSClient | null = null;
+let messageWsClientConfigKey = "";
+const userProfileCache = new Map<string, UserProfileSummary>();
+const userProfilePending = new Map<string, Promise<UserProfileSummary>>();
+let realtimeConnectionStatus: RealtimeConnectionStatus = {
+  state: "disabled",
+  message: "实时连接未启用",
+  updatedAt: Date.now(),
+};
 
 function resolveBrand(brand: Brand = "feishu") {
   if (brand === "lark") {
@@ -157,6 +200,38 @@ async function callOpenApi<T = Record<string, unknown>>(params: {
     });
   }
   return ((payload.data as Record<string, unknown>) || {}) as T;
+}
+
+async function getTenantAccessToken(params: {
+  brand: Brand;
+  appId: string;
+  appSecret: string;
+}) {
+  const { brand, appId, appSecret } = params;
+  const { openBase } = resolveBrand(brand);
+  const url = `${openBase}/open-apis/auth/v3/tenant_access_token/internal`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      app_id: appId,
+      app_secret: appSecret,
+    }),
+  });
+  const payload = await parseJsonResponse(resp);
+  const code = Number(payload.code ?? 0);
+  if (!resp.ok || code !== 0) {
+    throw new FeishuApiError(getApiErrorMessage(payload, resp.status, "获取 tenant_access_token 失败"), {
+      code: Number.isFinite(code) ? code : undefined,
+      status: resp.status,
+    });
+  }
+
+  const token = String(payload.tenant_access_token || "");
+  if (!token) {
+    throw new Error("获取 tenant_access_token 失败：未返回 token。");
+  }
+  return token;
 }
 
 async function refreshUserAccessToken() {
@@ -327,7 +402,7 @@ function extractAvatarUrl(source: unknown) {
   );
 }
 
-function normalizeUserConversation(user: Record<string, unknown>) {
+function normalizeUserConversation(user: Record<string, unknown>): ConversationListItem {
   const openId = String(user.open_id || user.user_id || "");
   return {
     id: `user:${openId}`,
@@ -350,10 +425,14 @@ function normalizeUserConversation(user: Record<string, unknown>) {
     ),
     avatarUrl: extractAvatarUrl(user.avatar) || undefined,
     userOpenId: openId,
+    source: "user",
   };
 }
 
-function normalizeChatConversation(rawItem: Record<string, unknown>) {
+function normalizeChatConversation(
+  rawItem: Record<string, unknown>,
+  source: ConversationSource = "user"
+): ConversationListItem {
   const item = ((rawItem.meta_data as Record<string, unknown> | undefined) || rawItem) as Record<
     string,
     unknown
@@ -361,7 +440,7 @@ function normalizeChatConversation(rawItem: Record<string, unknown>) {
   const chatId = String(item.chat_id || "");
   const chatMode = String(item.chat_mode || item.chat_type || "");
   const userOpenId = String(item.p2p_chatter_id || item.open_id || "");
-  const type = chatMode.toLowerCase() === "p2p" ? "p2p" : "group";
+  const type: ConversationListItem["type"] = chatMode.toLowerCase() === "p2p" ? "p2p" : "group";
   const title = String(item.name || item.chat_name || item.display_name || chatId || userOpenId);
   const description = String(item.description || item.chat_mode || "");
 
@@ -374,7 +453,468 @@ function normalizeChatConversation(rawItem: Record<string, unknown>) {
     avatarUrl: extractAvatarUrl(item.avatar) || undefined,
     chatId: chatId || undefined,
     userOpenId: userOpenId || "",
+    source,
   };
+}
+
+function normalizeBotRecentChat(chat: tokenStore.BotRecentChat): ConversationListItem {
+  return {
+    id: `user:${chat.userOpenId}`,
+    type: "p2p",
+    title: chat.title || chat.userOpenId || "机器人会话",
+    subtitle: chat.lastMessagePreview || "机器人私聊会话",
+    avatarUrl: chat.avatarUrl || undefined,
+    chatId: chat.chatId,
+    userOpenId: chat.userOpenId,
+    source: "bot",
+  };
+}
+
+function normalizeChatSearchQuery(query: string) {
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery.includes("-")) {
+    return trimmedQuery;
+  }
+
+  let normalizedQuery = trimmedQuery;
+  if (
+    normalizedQuery.length >= 2 &&
+    ((normalizedQuery.startsWith('"') && normalizedQuery.endsWith('"')) ||
+      (normalizedQuery.startsWith("'") && normalizedQuery.endsWith("'")))
+  ) {
+    normalizedQuery = normalizedQuery.slice(1, -1);
+  } else {
+    try {
+      const parsed = JSON.parse(normalizedQuery) as unknown;
+      if (typeof parsed === "string") {
+        normalizedQuery = parsed;
+      }
+    } catch {
+      // keep raw query when it is not a JSON-quoted string
+    }
+  }
+
+  return JSON.stringify(normalizedQuery);
+}
+
+function isGroupConversation(item: ConversationListItem) {
+  return item.type === "group" && !!item.chatId;
+}
+
+function matchesConversationQuery(item: ConversationListItem, query: string) {
+  const keyword = query.trim().toLocaleLowerCase();
+  if (!keyword) {
+    return true;
+  }
+
+  return [item.title, item.subtitle || "", item.userOpenId || ""].some((value) =>
+    value.toLocaleLowerCase().includes(keyword)
+  );
+}
+
+function mergeContactItems(userItems: ConversationListItem[], botRecentItems: ConversationListItem[]) {
+  return mergeConversationLists([...userItems, ...botRecentItems]).filter((item) => item.userOpenId);
+}
+
+function mergeConversationSource(
+  left: ConversationSource,
+  right: ConversationSource
+): ConversationSource {
+  if (left === right) return left;
+  return "mixed";
+}
+
+function pickPrimaryConversation(base: ConversationListItem, incoming: ConversationListItem) {
+  const baseWeight = base.source === "user" || base.source === "mixed" ? 2 : 1;
+  const incomingWeight = incoming.source === "user" || incoming.source === "mixed" ? 2 : 1;
+  return incomingWeight > baseWeight ? incoming : base;
+}
+
+function mergeConversationItem(base: ConversationListItem, incoming: ConversationListItem): ConversationListItem {
+  const primary = pickPrimaryConversation(base, incoming);
+  const secondary = primary === base ? incoming : base;
+
+  return {
+    ...primary,
+    subtitle: primary.subtitle || secondary.subtitle,
+    avatarUrl: primary.avatarUrl || secondary.avatarUrl,
+    chatId: primary.chatId || secondary.chatId,
+    userOpenId: primary.userOpenId || secondary.userOpenId,
+    source: mergeConversationSource(base.source, incoming.source),
+  };
+}
+
+function mergeConversationLists(items: ConversationListItem[]) {
+  const deduped = new Map<string, ConversationListItem>();
+  const orderedIds: string[] = [];
+  items
+    .filter((item) => item.chatId || item.userOpenId)
+    .forEach((item) => {
+      const existing = deduped.get(item.id);
+      if (!existing) {
+        deduped.set(item.id, item);
+        orderedIds.push(item.id);
+        return;
+      }
+      deduped.set(item.id, mergeConversationItem(existing, item));
+    });
+
+  return orderedIds
+    .map((id) => deduped.get(id))
+    .filter((item): item is ConversationListItem => !!item);
+}
+
+function sendToWindow(window: BrowserWindow | null, channel: string, payload: unknown) {
+  if (!window || window.isDestroyed()) return;
+  window.webContents.send(channel, payload);
+}
+
+function broadcastToRenderers(channel: string, payload: unknown) {
+  sendToWindow(mainWindow, channel, payload);
+  sendToWindow(messagesWindow, channel, payload);
+}
+
+function updateRealtimeConnectionStatus(
+  state: RealtimeConnectionStatus["state"],
+  message: string
+) {
+  const nextStatus: RealtimeConnectionStatus = {
+    state,
+    message,
+    updatedAt: Date.now(),
+  };
+
+  const unchanged =
+    realtimeConnectionStatus.state === nextStatus.state &&
+    realtimeConnectionStatus.message === nextStatus.message;
+
+  realtimeConnectionStatus = nextStatus;
+  if (!unchanged) {
+    broadcastToRenderers("messages:realtimeStatus", nextStatus);
+  }
+}
+
+function handleWsLog(level: "error" | "warn" | "info" | "debug" | "trace", args: unknown[]) {
+  const text = args.map((item) => String(item ?? "")).join(" ");
+
+  if (text.includes("reconnect success") || text.includes("ws connect success") || text.includes("ws client ready")) {
+    updateRealtimeConnectionStatus("connected", "实时连接已建立");
+  } else if (text.includes("reconnect")) {
+    updateRealtimeConnectionStatus("reconnecting", "实时连接正在重连");
+  } else if (text.includes("ws connect failed") || text.includes("connect failed")) {
+    updateRealtimeConnectionStatus("error", "实时连接建立失败");
+  } else if (text.includes("ws error")) {
+    updateRealtimeConnectionStatus("error", "实时连接出现异常");
+  } else if (text.includes("client closed") || text.includes("closed manually")) {
+    updateRealtimeConnectionStatus("disabled", "实时连接已关闭");
+  }
+
+  if (level === "error") {
+    console.error("[Feishu WS]", ...args);
+  } else if (level === "warn") {
+    console.warn("[Feishu WS]", ...args);
+  }
+}
+
+const feishuWsLogger = {
+  error: (...args: unknown[]) => handleWsLog("error", args),
+  warn: (...args: unknown[]) => handleWsLog("warn", args),
+  info: (...args: unknown[]) => handleWsLog("info", args),
+  debug: (...args: unknown[]) => handleWsLog("debug", args),
+  trace: (...args: unknown[]) => handleWsLog("trace", args),
+};
+
+function normalizeRealtimeIncomingMessage(
+  data: Parameters<NonNullable<Lark.EventHandles["im.message.receive_v1"]>>[0]
+): RealtimeIncomingMessagePayload | null {
+  const messageId = String(data.message?.message_id || "");
+  const chatId = String(data.message?.chat_id || "");
+  if (!messageId || !chatId) {
+    return null;
+  }
+
+  return {
+    eventType: "im.message.receive_v1",
+    messageId,
+    chatId,
+    chatType: String(data.message?.chat_type || ""),
+    messageType: String(data.message?.message_type || ""),
+    contentText: parseMessageContent(String(data.message?.message_type || ""), data.message?.content),
+    createTime: formatMessageTime(data.message?.create_time),
+    rawCreateTime: data.message?.create_time || undefined,
+    senderOpenId: data.sender?.sender_id?.open_id || undefined,
+  };
+}
+
+async function fetchUserProfileByOpenId(userOpenId: string) {
+  try {
+    const { brand, accessToken } = getAuthContext();
+    const data = await callOpenApiWithRefresh<{
+      user?: Record<string, unknown>;
+    }>({
+      brand,
+      accessToken,
+      method: "GET",
+      apiPath: `/open-apis/contact/v3/users/${encodeURIComponent(userOpenId)}`,
+      query: {
+        user_id_type: "open_id",
+      },
+    });
+
+    const user = data.user || {};
+    return {
+      title: String(user.name || user.nickname || user.en_name || userOpenId),
+      avatarUrl: extractAvatarUrl(user.avatar) || undefined,
+    };
+  } catch {
+    try {
+      const { brand, accessToken } = getAuthContext();
+      const data = await callOpenApiWithRefresh<{
+        users?: Array<Record<string, unknown>>;
+      }>({
+        brand,
+        accessToken,
+        method: "POST",
+        apiPath: "/open-apis/contact/v3/users/basic_batch",
+        query: {
+          user_id_type: "open_id",
+        },
+        body: {
+          user_ids: [userOpenId],
+        },
+      });
+
+      const user = data.users?.[0] || {};
+      return {
+        title: String(user.name || user.nickname || user.en_name || user.user_id || userOpenId),
+        avatarUrl: extractAvatarUrl(user.avatar) || undefined,
+      };
+    } catch {
+      return {
+        title: userOpenId,
+        avatarUrl: undefined,
+      };
+    };
+  }
+}
+
+function extractMentionOpenId(mention: Record<string, unknown>) {
+  const directId = mention.id;
+  if (typeof directId === "string" && directId.startsWith("ou_")) {
+    return directId;
+  }
+
+  if (directId && typeof directId === "object") {
+    const openId = String((directId as Record<string, unknown>).open_id || "");
+    if (openId) {
+      return openId;
+    }
+  }
+
+  const userId = mention.user_id;
+  if (typeof userId === "string" && userId.startsWith("ou_")) {
+    return userId;
+  }
+
+  if (userId && typeof userId === "object") {
+    const openId = String((userId as Record<string, unknown>).open_id || "");
+    if (openId) {
+      return openId;
+    }
+  }
+
+  return "";
+}
+
+function extractSenderProfilesFromMentions(items: Array<Record<string, unknown>>) {
+  const profiles = new Map<string, UserProfileSummary>();
+
+  items.forEach((item) => {
+    const mentions = item.mentions;
+    if (!Array.isArray(mentions)) {
+      return;
+    }
+
+    mentions.forEach((rawMention) => {
+      if (!rawMention || typeof rawMention !== "object") {
+        return;
+      }
+
+      const mention = rawMention as Record<string, unknown>;
+      const openId = extractMentionOpenId(mention);
+      const title = String(mention.name || mention.display_name || "");
+      if (!openId || !title) {
+        return;
+      }
+
+      const profile = {
+        title,
+        avatarUrl: extractAvatarUrl(mention.avatar) || undefined,
+      };
+      profiles.set(openId, profile);
+      userProfileCache.set(openId, profile);
+    });
+  });
+
+  return profiles;
+}
+
+async function getCachedUserProfileByOpenId(userOpenId: string) {
+  if (!userOpenId) {
+    return {
+      title: "",
+      avatarUrl: undefined,
+    };
+  }
+
+  const cachedProfile = userProfileCache.get(userOpenId);
+  if (cachedProfile) {
+    return cachedProfile;
+  }
+
+  const pendingProfile = userProfilePending.get(userOpenId);
+  if (pendingProfile) {
+    return pendingProfile;
+  }
+
+  const profilePromise = fetchUserProfileByOpenId(userOpenId)
+    .then((profile) => {
+      userProfileCache.set(userOpenId, profile);
+      return profile;
+    })
+    .finally(() => {
+      userProfilePending.delete(userOpenId);
+    });
+
+  userProfilePending.set(userOpenId, profilePromise);
+  return profilePromise;
+}
+
+function parseRawTimestamp(rawValue: string) {
+  const numericValue = Number(rawValue);
+  if (!Number.isFinite(numericValue)) {
+    return undefined;
+  }
+  return rawValue.length >= 13 ? numericValue : numericValue * 1000;
+}
+
+async function persistBotRecentChatFromRealtimeMessage(payload: RealtimeIncomingMessagePayload) {
+  if (payload.chatType !== "p2p" || !payload.senderOpenId) {
+    return;
+  }
+
+  const profile = await fetchUserProfileByOpenId(payload.senderOpenId);
+  tokenStore.saveBotRecentChat({
+    chatId: payload.chatId,
+    userOpenId: payload.senderOpenId,
+    title: profile.title,
+    avatarUrl: profile.avatarUrl,
+    lastMessagePreview: payload.contentText,
+    lastMessageAt: parseRawTimestamp(payload.rawCreateTime || "") ?? Date.now(),
+  });
+}
+
+async function persistBotRecentChatEnteredEvent(data: {
+  chatId: string;
+  userOpenId: string;
+  lastMessageAt?: number;
+}) {
+  const profile = await fetchUserProfileByOpenId(data.userOpenId);
+  tokenStore.saveBotRecentChat({
+    chatId: data.chatId,
+    userOpenId: data.userOpenId,
+    title: profile.title,
+    avatarUrl: profile.avatarUrl,
+    lastMessageAt: data.lastMessageAt ?? Date.now(),
+  });
+
+  const payload: RealtimeConversationChangedPayload = {
+    eventType: "im.chat.access_event.bot_p2p_chat_entered_v1",
+    chatId: data.chatId,
+    userOpenId: data.userOpenId,
+    title: profile.title,
+    avatarUrl: profile.avatarUrl,
+    lastMessageAt: data.lastMessageAt ?? Date.now(),
+  };
+  broadcastToRenderers("messages:conversationChanged", payload);
+}
+
+function stopMessageRealtimeSubscription() {
+  if (!messageWsClient) {
+    messageWsClientConfigKey = "";
+    updateRealtimeConnectionStatus("disabled", "实时连接未启用");
+    return;
+  }
+
+  const currentClient = messageWsClient;
+  messageWsClient = null;
+  messageWsClientConfigKey = "";
+  currentClient.close({ force: true });
+  updateRealtimeConnectionStatus("disabled", "实时连接已关闭");
+}
+
+async function ensureMessageRealtimeSubscription() {
+  const appConfig = tokenStore.getAppConfig();
+  if (!appConfig?.clientId || !appConfig?.clientSecret) {
+    stopMessageRealtimeSubscription();
+    return;
+  }
+
+  const brand = (appConfig.brand || "feishu") as Brand;
+  const configKey = `${brand}:${appConfig.clientId}:${appConfig.clientSecret}`;
+  if (messageWsClient && messageWsClientConfigKey === configKey) {
+    return;
+  }
+
+  stopMessageRealtimeSubscription();
+  updateRealtimeConnectionStatus("connecting", "正在建立实时连接");
+
+  const eventDispatcher = new Lark.EventDispatcher({
+    logger: feishuWsLogger,
+    loggerLevel: Lark.LoggerLevel.trace,
+  }).register({
+    "im.message.receive_v1": async (data) => {
+      const payload = normalizeRealtimeIncomingMessage(data);
+      if (!payload) return;
+      await persistBotRecentChatFromRealtimeMessage(payload);
+      broadcastToRenderers("messages:incomingMessage", payload);
+    },
+    "im.chat.access_event.bot_p2p_chat_entered_v1": async (data) => {
+      const chatId = String(data.chat_id || "");
+      const userOpenId = String(data.operator_id?.open_id || "");
+      if (!chatId || !userOpenId) {
+        return;
+      }
+
+      await persistBotRecentChatEnteredEvent({
+        chatId,
+        userOpenId,
+        lastMessageAt: parseRawTimestamp(String(data.last_message_create_time || "")) ?? Date.now(),
+      });
+    },
+  });
+
+  const wsClient = new Lark.WSClient({
+    appId: appConfig.clientId,
+    appSecret: appConfig.clientSecret,
+    domain: brand === "lark" ? Lark.Domain.Lark : Lark.Domain.Feishu,
+    autoReconnect: true,
+    logger: feishuWsLogger,
+    loggerLevel: Lark.LoggerLevel.trace,
+  });
+
+  messageWsClient = wsClient;
+  messageWsClientConfigKey = configKey;
+
+  try {
+    await wsClient.start({ eventDispatcher });
+  } catch (error) {
+    if (messageWsClient === wsClient) {
+      stopMessageRealtimeSubscription();
+    }
+    updateRealtimeConnectionStatus("error", "实时连接启动失败");
+    console.error("[Feishu WS] 启动长连接失败", error);
+  }
 }
 
 async function collectPagedItems(
@@ -398,6 +938,101 @@ async function collectPagedItems(
   return items;
 }
 
+async function loadUserChatList(brand: Brand, accessToken: string) {
+  return collectPagedItems((pageToken) =>
+    callOpenApiWithRefresh<{
+      items?: Array<Record<string, unknown>>;
+      has_more?: boolean;
+      page_token?: string;
+    }>({
+      brand,
+      accessToken,
+      method: "GET",
+      apiPath: "/open-apis/im/v1/chats",
+      query: {
+        sort_type: "ByActiveTimeDesc",
+        page_size: 100,
+        page_token: pageToken,
+      },
+    })
+  );
+}
+
+async function loadBotChatList(brand: Brand, clientId: string, clientSecret: string) {
+  try {
+    const tenantAccessToken = await getTenantAccessToken({
+      brand,
+      appId: clientId,
+      appSecret: clientSecret,
+    });
+
+    return collectPagedItems((pageToken) =>
+      callOpenApi<{
+        items?: Array<Record<string, unknown>>;
+        has_more?: boolean;
+        page_token?: string;
+      }>({
+        brand,
+        accessToken: tenantAccessToken,
+        method: "GET",
+        apiPath: "/open-apis/im/v1/chats",
+        query: {
+          sort_type: "ByActiveTimeDesc",
+          page_size: 100,
+          page_token: pageToken,
+        },
+      })
+    );
+  } catch (error) {
+    console.warn("[Messages] 加载机器人群聊列表失败", error);
+    return [];
+  }
+}
+
+async function searchUserChats(brand: Brand, accessToken: string, query: string) {
+  const data = await callOpenApiWithRefresh<{ items?: Array<Record<string, unknown>> }>({
+    brand,
+    accessToken,
+    method: "POST",
+    apiPath: "/open-apis/im/v2/chats/search",
+    query: {
+      page_size: 20,
+    },
+    body: {
+      query: normalizeChatSearchQuery(query),
+    },
+  });
+
+  return (data.items || []).map((item) => normalizeChatConversation(item, "user"));
+}
+
+async function searchBotChats(brand: Brand, clientId: string, clientSecret: string, query: string) {
+  try {
+    const tenantAccessToken = await getTenantAccessToken({
+      brand,
+      appId: clientId,
+      appSecret: clientSecret,
+    });
+    const data = await callOpenApi<{ items?: Array<Record<string, unknown>> }>({
+      brand,
+      accessToken: tenantAccessToken,
+      method: "POST",
+      apiPath: "/open-apis/im/v2/chats/search",
+      query: {
+        page_size: 20,
+      },
+      body: {
+        query: normalizeChatSearchQuery(query),
+      },
+    });
+
+    return (data.items || []).map((item) => normalizeChatConversation(item, "bot"));
+  } catch (error) {
+    console.warn("[Messages] 搜索机器人群聊失败", error);
+    return [];
+  }
+}
+
 async function searchUsers(query: string): Promise<ConversationListResult> {
   const { brand, accessToken, scope } = getAuthContext();
   ensureScopes(scope, ["contact:user:search"]);
@@ -413,8 +1048,12 @@ async function searchUsers(query: string): Promise<ConversationListResult> {
   });
 
   const items = (data.users || []).map(normalizeUserConversation);
+  const botRecentItems = tokenStore
+    .getBotRecentChats()
+    .map(normalizeBotRecentChat)
+    .filter((item) => matchesConversationQuery(item, query));
 
-  return { items: items.filter((item) => item.userOpenId) };
+  return { items: mergeContactItems(items.filter((item) => item.userOpenId), botRecentItems) };
 }
 
 async function listContacts(): Promise<ConversationListResult> {
@@ -438,67 +1077,38 @@ async function listContacts(): Promise<ConversationListResult> {
     })
   );
 
-  const deduped = new Map<string, ReturnType<typeof normalizeUserConversation>>();
-  users
-    .map(normalizeUserConversation)
-    .filter((item) => item.userOpenId)
-    .forEach((item) => {
-      deduped.set(item.id, item);
-    });
+  const userItems = users.map(normalizeUserConversation).filter((item) => item.userOpenId);
+  const botRecentItems = tokenStore.getBotRecentChats().map(normalizeBotRecentChat);
 
-  return { items: Array.from(deduped.values()) };
+  return { items: mergeContactItems(userItems, botRecentItems) };
 }
 
 async function searchChats(query: string): Promise<ConversationListResult> {
-  const { brand, accessToken, scope } = getAuthContext();
+  const { brand, accessToken, scope, clientId, clientSecret } = getAuthContext();
   ensureScopes(scope, ["im:chat:read"]);
-  const data = await callOpenApiWithRefresh<{ items?: Array<Record<string, unknown>> }>({
-    brand,
-    accessToken,
-    method: "POST",
-    apiPath: "/open-apis/im/v2/chats/search",
-    query: {
-      page_size: 20,
-    },
-    body: {
-      query,
-    },
-  });
-
-  const items = (data.items || []).map(normalizeChatConversation).filter((item) => item.chatId);
+  const [userItems, botItems] = await Promise.all([
+    searchUserChats(brand, accessToken, query),
+    searchBotChats(brand, clientId, clientSecret, query),
+  ]);
+  const items = mergeConversationLists([...userItems, ...botItems]).filter(isGroupConversation);
 
   return { items };
 }
 
 async function listChats(): Promise<ConversationListResult> {
-  const { brand, accessToken, scope } = getAuthContext();
+  const { brand, accessToken, scope, clientId, clientSecret } = getAuthContext();
   ensureScopes(scope, ["im:chat:read"]);
-  const chats = await collectPagedItems((pageToken) =>
-    callOpenApiWithRefresh<{
-      items?: Array<Record<string, unknown>>;
-      has_more?: boolean;
-      page_token?: string;
-    }>({
-      brand,
-      accessToken,
-      method: "GET",
-      apiPath: "/open-apis/im/v1/chats",
-      query: {
-        page_size: 100,
-        page_token: pageToken,
-      },
-    })
-  );
+  const [userChats, botChats] = await Promise.all([
+    loadUserChatList(brand, accessToken),
+    loadBotChatList(brand, clientId, clientSecret),
+  ]);
 
-  const deduped = new Map<string, ReturnType<typeof normalizeChatConversation>>();
-  chats
-    .map(normalizeChatConversation)
-    .filter((item) => item.chatId || item.userOpenId)
-    .forEach((item) => {
-      deduped.set(item.id, item);
-    });
-
-  return { items: Array.from(deduped.values()) };
+  return {
+    items: mergeConversationLists([
+      ...userChats.map((item) => normalizeChatConversation(item, "user")),
+      ...botChats.map((item) => normalizeChatConversation(item, "bot")),
+    ]).filter(isGroupConversation),
+  };
 }
 
 async function resolveP2PChat(userOpenId: string) {
@@ -529,32 +1139,112 @@ async function listChatMessages(params: {
   pageToken?: string;
   pageSize?: number;
   sort?: "asc" | "desc";
+  identity?: "user" | "bot" | "auto";
 }): Promise<ListChatMessagesResult> {
-  const { brand, accessToken, currentUserName, currentUserOpenId, scope } = getAuthContext();
-  ensureScopes(scope, ["im:message.group_msg:get_as_user", "im:message.p2p_msg:get_as_user"]);
-  const pageSize = Math.min(50, Math.max(1, params.pageSize || 30));
-  const data = await callOpenApiWithRefresh<{
-    items?: Array<Record<string, unknown>>;
-    has_more?: boolean;
-    page_token?: string;
-  }>({
+  const {
     brand,
     accessToken,
-    method: "GET",
-    apiPath: "/open-apis/im/v1/messages",
-    query: {
-      container_id_type: "chat",
-      container_id: params.chatId,
-      sort_type: params.sort === "asc" ? "ByCreateTimeAsc" : "ByCreateTimeDesc",
-      page_size: pageSize,
-      page_token: params.pageToken,
-      card_msg_content_type: "raw_card_content",
-    },
+    currentUserName,
+    currentUserOpenId,
+    scope,
+    clientId,
+    clientSecret,
+    userInfo,
+  } = getAuthContext();
+  const pageSize = Math.min(50, Math.max(1, params.pageSize || 30));
+  const identity = params.identity || "auto";
+  const query = {
+    container_id_type: "chat",
+    container_id: params.chatId,
+    sort_type: params.sort === "asc" ? "ByCreateTimeAsc" : "ByCreateTimeDesc",
+    page_size: pageSize,
+    page_token: params.pageToken,
+    card_msg_content_type: "raw_card_content",
+  };
+
+  const loadAsUser = async () => {
+    ensureScopes(scope, ["im:message.group_msg:get_as_user", "im:message.p2p_msg:get_as_user"]);
+    return callOpenApiWithRefresh<{
+      items?: Array<Record<string, unknown>>;
+      has_more?: boolean;
+      page_token?: string;
+    }>({
+      brand,
+      accessToken,
+      method: "GET",
+      apiPath: "/open-apis/im/v1/messages",
+      query,
+    });
+  };
+
+  const loadAsBot = async () => {
+    const tenantAccessToken = await getTenantAccessToken({
+      brand,
+      appId: clientId,
+      appSecret: clientSecret,
+    });
+    return callOpenApi<{
+      items?: Array<Record<string, unknown>>;
+      has_more?: boolean;
+      page_token?: string;
+    }>({
+      brand,
+      accessToken: tenantAccessToken,
+      method: "GET",
+      apiPath: "/open-apis/im/v1/messages",
+      query,
+    });
+  };
+
+  const data =
+    identity === "bot"
+      ? await loadAsBot()
+      : identity === "user"
+        ? await loadAsUser()
+        : await loadAsUser();
+  const mentionProfiles = extractSenderProfilesFromMentions(data.items || []);
+
+  const senderOpenIds = Array.from(
+    new Set(
+      (data.items || [])
+        .map((item) => {
+          const sender = (item.sender || {}) as Record<string, unknown>;
+          return getSenderOpenId(sender);
+        })
+        .filter((openId) => !!openId && openId !== currentUserOpenId)
+    )
+  );
+  const senderProfiles = new Map<string, UserProfileSummary>();
+  mentionProfiles.forEach((profile, openId) => {
+    senderProfiles.set(openId, profile);
   });
+
+  await Promise.all(
+    senderOpenIds.map(async (openId) => {
+      const existingProfile = senderProfiles.get(openId);
+      if (existingProfile?.title && existingProfile.avatarUrl) {
+        return;
+      }
+      const profile = await getCachedUserProfileByOpenId(openId);
+      senderProfiles.set(openId, {
+        title:
+          existingProfile?.title && existingProfile.title !== openId
+            ? existingProfile.title
+            : profile.title,
+        avatarUrl: existingProfile?.avatarUrl || profile.avatarUrl,
+      });
+    })
+  );
 
   const items = (data.items || []).map((item) => {
     const sender = (item.sender || {}) as Record<string, unknown>;
     const senderOpenId = getSenderOpenId(sender);
+    const isSelf = !!senderOpenId && senderOpenId === currentUserOpenId;
+    const senderId = String(sender.id || "");
+    const senderType = String(sender.sender_type || "");
+    const senderNameFromPayload = String(
+      sender.name || sender.user_name || sender.display_name || sender.sender_name || ""
+    );
     const senderAvatar = sender.avatar;
     const senderAvatarUrl =
       senderAvatar && typeof senderAvatar === "object"
@@ -566,16 +1256,26 @@ async function listChatMessages(params: {
         : "";
     const messageType = String(item.msg_type || "");
     const body = (item.body || {}) as Record<string, unknown>;
+    const senderProfile = senderOpenId ? senderProfiles.get(senderOpenId) : undefined;
+    const senderName =
+      messageType === "system" && !senderOpenId && !senderNameFromPayload
+        ? "系统"
+        : isSelf
+          ? currentUserName || "我"
+          : senderNameFromPayload ||
+            senderProfile?.title ||
+            (senderType === "app" ? "机器人应用" : senderOpenId || senderId || undefined);
+    const resolvedAvatarUrl = isSelf
+      ? userInfo?.avatarUrl || senderAvatarUrl || undefined
+      : senderAvatarUrl || senderProfile?.avatarUrl || undefined;
 
     return {
       messageId: String(item.message_id || ""),
       chatId: String(item.chat_id || params.chatId),
-      senderName: senderOpenId
-        ? senderOpenId === currentUserOpenId
-          ? currentUserName || "我"
-          : undefined
-        : undefined,
-      senderAvatarUrl: senderAvatarUrl || undefined,
+      senderName,
+      senderAvatarUrl: resolvedAvatarUrl,
+      senderOpenId: senderOpenId || undefined,
+      isSelf,
       messageType,
       contentText: parseMessageContent(messageType, body.content),
       createTime: formatMessageTime(item.create_time),
@@ -745,7 +1445,7 @@ function closeAuthWindow(notify = false) {
   return true;
 }
 
-function openAuthWindow(url: string) {
+function openAuthWindow(url: string, title = "授权") {
   closeAuthWindow(false);
 
   authWindow = new BrowserWindow({
@@ -753,7 +1453,7 @@ function openAuthWindow(url: string) {
     height: 860,
     minWidth: 560,
     minHeight: 760,
-    title: "授权",
+    title,
     autoHideMenuBar: true,
     parent: mainWindow ?? undefined,
     modal: false,
@@ -796,9 +1496,13 @@ function openAuthWindow(url: string) {
   authWindow.contentView.addChildView(authView);
 
   if (!app.isPackaged) {
-    void authWindow.loadURL(getRendererEntryUrl("?auth-shell=1"));
+    void authWindow.loadURL(
+      getRendererEntryUrl(`?auth-shell=1&title=${encodeURIComponent(title)}`)
+    );
   } else {
-    void authWindow.loadFile(getRendererEntryUrl(), { search: "?auth-shell=1" });
+    void authWindow.loadFile(getRendererEntryUrl(), {
+      search: `?auth-shell=1&title=${encodeURIComponent(title)}`,
+    });
   }
 
   authWindow.webContents.once("did-finish-load", () => {
@@ -831,6 +1535,7 @@ ipcMain.handle("config:getInitStatus", () => {
 // ── 保存应用配置 IPC ──
 ipcMain.handle("config:saveAppConfig", (_event, config) => {
   tokenStore.saveAppConfig(config);
+  void ensureMessageRealtimeSubscription();
   return { success: true };
 });
 
@@ -856,6 +1561,7 @@ ipcMain.handle("config:saveUiPreferences", (_event, preferences) => {
 
 // ── 清空配置 IPC ──
 ipcMain.handle("config:clearConfig", () => {
+  stopMessageRealtimeSubscription();
   tokenStore.clearConfig();
   return { success: true };
 });
@@ -893,8 +1599,12 @@ ipcMain.handle(
   }
 );
 
-ipcMain.handle("auth:openAuthWindow", (_event, url: string) => {
-  openAuthWindow(url);
+ipcMain.handle("messages:getRealtimeStatus", () => {
+  return realtimeConnectionStatus;
+});
+
+ipcMain.handle("auth:openAuthWindow", (_event, url: string, title?: string) => {
+  openAuthWindow(url, title || "授权");
   return { success: true };
 });
 
@@ -1069,6 +1779,11 @@ app.whenReady().then(() => {
     Menu.setApplicationMenu(null);
   }
   createWindow();
+  void ensureMessageRealtimeSubscription();
+});
+
+app.on("before-quit", () => {
+  stopMessageRealtimeSubscription();
 });
 
 app.on("window-all-closed", () => {

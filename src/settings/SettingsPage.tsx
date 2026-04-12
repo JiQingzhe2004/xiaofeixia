@@ -47,7 +47,10 @@ import {
   loginPollUntilComplete,
   type LoginPollStatusEvent,
 } from "../services/userLoginService";
-import { MESSAGE_FEATURE_SCOPES } from "../auth/messageFeatureScopes";
+import {
+  APP_MESSAGE_FEATURE_SCOPES,
+  USER_MESSAGE_FEATURE_SCOPES,
+} from "../auth/messageFeatureScopes";
 import type { UiPreferences } from "../types/uiPreferences";
 import packageJson from "../../package.json";
 import appIcon from "../../resources/icons/icon_1024.png";
@@ -67,7 +70,7 @@ const SETTINGS_ITEMS: Array<{
   {
     id: "account",
     label: "账号与授权",
-    description: "管理消息页权限与授权状态",
+    description: "管理消息页、联系人和机器人会话权限",
     icon: ShieldCheck,
   },
   {
@@ -128,6 +131,7 @@ export default function SettingsPage({ onReauthorized }: Props) {
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const ignoreNextAuthWindowClosedRef = useRef(false);
+  const reauthorizeActiveRef = useRef(false);
 
   useEffect(() => {
     void loadGrantedScopes();
@@ -140,6 +144,10 @@ export default function SettingsPage({ onReauthorized }: Props) {
   useEffect(() => {
     if (!window.authBridge?.onAuthWindowClosed) return;
     return window.authBridge.onAuthWindowClosed(() => {
+      if (!reauthorizeActiveRef.current) {
+        return;
+      }
+
       if (ignoreNextAuthWindowClosedRef.current) {
         ignoreNextAuthWindowClosedRef.current = false;
         return;
@@ -148,12 +156,15 @@ export default function SettingsPage({ onReauthorized }: Props) {
       abortRef.current?.abort();
       setLoading(false);
       setError("你已关闭授权窗口，重新授权已取消。");
+      reauthorizeActiveRef.current = false;
     });
   }, []);
 
-  const missingScopes = useMemo(() => {
+  const grantedScopeSet = useMemo(() => new Set(grantedScopes), [grantedScopes]);
+
+  const missingUserScopes = useMemo(() => {
     const granted = new Set(grantedScopes);
-    return MESSAGE_FEATURE_SCOPES.filter((scope) => !granted.has(scope));
+    return USER_MESSAGE_FEATURE_SCOPES.filter((scope) => !granted.has(scope));
   }, [grantedScopes]);
 
   const loadGrantedScopes = useCallback(async () => {
@@ -237,6 +248,7 @@ export default function SettingsPage({ onReauthorized }: Props) {
   }, [appBrand, loginAt, themeMode]);
 
   const handleReauthorize = useCallback(async () => {
+    reauthorizeActiveRef.current = true;
     setLoading(true);
     setError("");
     setSuccessMessage("");
@@ -253,7 +265,7 @@ export default function SettingsPage({ onReauthorized }: Props) {
         appConfig.clientId,
         appConfig.clientSecret,
         brand,
-        [...MESSAGE_FEATURE_SCOPES]
+        [...USER_MESSAGE_FEATURE_SCOPES]
       );
 
       const authUrl = data.verificationUriComplete || data.verificationUri;
@@ -298,6 +310,7 @@ export default function SettingsPage({ onReauthorized }: Props) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message.includes("用户取消") ? "重新授权已取消。" : message);
     } finally {
+      reauthorizeActiveRef.current = false;
       setLoading(false);
     }
   }, [loadGrantedScopes, onReauthorized]);
@@ -400,7 +413,7 @@ export default function SettingsPage({ onReauthorized }: Props) {
       {activeSection === "account" &&
         renderSectionShell(
           "账号与授权",
-          "使用当前应用配置重新拉起飞书用户授权，刷新消息页和联系人能力所需权限。",
+          "使用当前应用配置重新拉起飞书用户授权，补齐消息页、联系人能力所需权限。机器人会话能力仍取决于应用后台权限与事件订阅。",
           <List disablePadding>
             <ListItem
               sx={{
@@ -418,20 +431,22 @@ export default function SettingsPage({ onReauthorized }: Props) {
                   重新授权
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
-                  当消息页权限不足或需要补齐联系人能力时，从这里重新申请授权。
+                  当消息页权限不足，或需要补齐联系人能力时，从这里重新申请用户授权。
                 </Typography>
               </Box>
-              <Button
-                variant="contained"
-                onClick={() => void handleReauthorize()}
-                disabled={loading}
-                startIcon={
-                  loading ? <CircularProgress size={16} color="inherit" /> : <RefreshCw size={16} />
-                }
-                sx={{ minWidth: 132, textTransform: "none", borderRadius: 999 }}
-              >
-                {loading ? "授权中..." : "重新授权"}
-              </Button>
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1.25} sx={{ width: { xs: "100%", sm: "auto" } }}>
+                <Button
+                  variant="contained"
+                  onClick={() => void handleReauthorize()}
+                  disabled={loading}
+                  startIcon={
+                    loading ? <CircularProgress size={16} color="inherit" /> : <RefreshCw size={16} />
+                  }
+                  sx={{ minWidth: 132, textTransform: "none", borderRadius: 999 }}
+                >
+                  {loading ? "授权中..." : "重新授权"}
+                </Button>
+              </Stack>
             </ListItem>
 
             <Divider />
@@ -443,9 +458,14 @@ export default function SettingsPage({ onReauthorized }: Props) {
               <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
                 <Chip
                   size="small"
-                  color={missingScopes.length === 0 ? "success" : "warning"}
-                  label={missingScopes.length === 0 ? "消息权限完整" : `缺少 ${missingScopes.length} 项权限`}
+                  color={missingUserScopes.length === 0 ? "success" : "warning"}
+                  label={
+                    missingUserScopes.length === 0
+                      ? "用户授权完整"
+                      : `缺少 ${missingUserScopes.length} 项用户权限`
+                  }
                 />
+                <Chip size="small" color="info" variant="outlined" label="机器人能力需后台开通" />
                 {loading && loginPollStatus?.type && (
                   <Chip
                     size="small"
@@ -470,24 +490,51 @@ export default function SettingsPage({ onReauthorized }: Props) {
               <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1.25 }}>
                 所需权限
               </Typography>
-              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                {MESSAGE_FEATURE_SCOPES.map((scope) => {
-                  const granted = grantedScopes.includes(scope);
-                  return (
-                    <Chip
-                      key={scope}
-                      size="small"
-                      icon={granted ? <CheckCircle2 size={14} /> : <TriangleAlert size={14} />}
-                      color={granted ? "success" : "default"}
-                      variant={granted ? "filled" : "outlined"}
-                      label={formatScopeLabel(scope)}
-                    />
-                  );
-                })}
+              <Stack spacing={2}>
+                <Box>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
+                    用户授权
+                  </Typography>
+                  <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                    {USER_MESSAGE_FEATURE_SCOPES.map((scope) => {
+                      const granted = grantedScopeSet.has(scope);
+                      return (
+                        <Chip
+                          key={scope}
+                          size="small"
+                          icon={granted ? <CheckCircle2 size={14} /> : <TriangleAlert size={14} />}
+                          color={granted ? "success" : "default"}
+                          variant={granted ? "filled" : "outlined"}
+                          label={formatScopeLabel(scope)}
+                        />
+                      );
+                    })}
+                  </Stack>
+                </Box>
+
+                <Box>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
+                    机器人能力与事件订阅
+                  </Typography>
+                  <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                    {APP_MESSAGE_FEATURE_SCOPES.map((scope) => (
+                      <Chip
+                        key={scope}
+                        size="small"
+                        icon={<Layers3 size={14} />}
+                        color="info"
+                        variant="outlined"
+                        label={`${formatScopeLabel(scope)} · 后台配置`}
+                      />
+                    ))}
+                  </Stack>
+                </Box>
               </Stack>
             </ListItem>
 
-            {(error || successMessage || missingScopes.length > 0) && <Divider />}
+            {(error || successMessage || missingUserScopes.length > 0 || APP_MESSAGE_FEATURE_SCOPES.length > 0) && (
+              <Divider />
+            )}
 
             {error && (
               <ListItem sx={{ px: 3, py: 2, display: "block" }}>
@@ -501,13 +548,19 @@ export default function SettingsPage({ onReauthorized }: Props) {
               </ListItem>
             )}
 
-            {missingScopes.length > 0 && (
+            {missingUserScopes.length > 0 && (
               <ListItem sx={{ px: 3, py: 2, display: "block" }}>
                 <Alert severity="warning">
-                  如果点击重新授权后权限仍补不齐，说明这些权限还没有在飞书开发者后台为当前应用开通。
+                  如果点击重新授权后用户权限仍补不齐，说明这些权限还没有在飞书开发者后台为当前应用开通。
                 </Alert>
               </ListItem>
             )}
+
+            <ListItem sx={{ px: 3, py: 2, display: "block" }}>
+              <Alert severity="info">
+                机器人会话、长连接事件与 bot 侧群聊列表不通过当前用户 token 回填。即使用户重新授权成功，也仍需要在飞书开发者后台开启对应应用权限和事件订阅。
+                </Alert>
+              </ListItem>
           </List>,
           <ShieldCheck size={18} />
         )}

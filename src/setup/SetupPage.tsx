@@ -32,7 +32,7 @@ import {
 } from "../services/userLoginService";
 import type { Brand } from "../services/brandResolver";
 import { useNotice } from "../components/notice/NoticeCenter";
-import { MESSAGE_FEATURE_SCOPES } from "../auth/messageFeatureScopes";
+import { USER_MESSAGE_FEATURE_SCOPES } from "../auth/messageFeatureScopes";
 
 const STEP_LABELS = ["欢迎", "创建应用", "登录授权", "完成"];
 const PIG_EASTER_EGGS = [
@@ -187,7 +187,7 @@ export default function SetupPage({ onSetupComplete }: Props) {
         appResult.clientId!,
         appResult.clientSecret!,
         brand,
-        [...MESSAGE_FEATURE_SCOPES]
+        [...USER_MESSAGE_FEATURE_SCOPES]
       );
 
       const authUrl = data.verificationUriComplete || data.verificationUri;

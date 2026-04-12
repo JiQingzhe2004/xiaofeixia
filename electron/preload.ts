@@ -41,19 +41,88 @@ contextBridge.exposeInMainWorld("messagesBridge", {
   searchUsers: (query: string) => ipcRenderer.invoke("messages:searchUsers", query),
   searchChats: (query: string) => ipcRenderer.invoke("messages:searchChats", query),
   resolveP2PChat: (userOpenId: string) => ipcRenderer.invoke("messages:resolveP2PChat", userOpenId),
+  getRealtimeStatus: () => ipcRenderer.invoke("messages:getRealtimeStatus"),
   listChatMessages: (params: {
     chatId: string;
     pageToken?: string;
     pageSize?: number;
     sort?: "asc" | "desc";
+    identity?: "user" | "bot" | "auto";
   }) => ipcRenderer.invoke("messages:listChatMessages", params),
+  onIncomingMessage: (
+    callback: (payload: {
+      eventType: "im.message.receive_v1";
+      messageId: string;
+      chatId: string;
+      chatType: string;
+      messageType: string;
+      contentText: string;
+      createTime: string;
+      senderOpenId?: string;
+    }) => void
+  ) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+      callback(payload as {
+        eventType: "im.message.receive_v1";
+        messageId: string;
+        chatId: string;
+        chatType: string;
+        messageType: string;
+        contentText: string;
+        createTime: string;
+        senderOpenId?: string;
+      });
+    };
+    ipcRenderer.on("messages:incomingMessage", listener);
+    return () => ipcRenderer.removeListener("messages:incomingMessage", listener);
+  },
+  onConversationChanged: (
+    callback: (payload: {
+      eventType: "im.chat.access_event.bot_p2p_chat_entered_v1";
+      chatId: string;
+      userOpenId: string;
+      title?: string;
+      avatarUrl?: string;
+      lastMessageAt?: number;
+    }) => void
+  ) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+      callback(payload as {
+        eventType: "im.chat.access_event.bot_p2p_chat_entered_v1";
+        chatId: string;
+        userOpenId: string;
+        title?: string;
+        avatarUrl?: string;
+        lastMessageAt?: number;
+      });
+    };
+    ipcRenderer.on("messages:conversationChanged", listener);
+    return () => ipcRenderer.removeListener("messages:conversationChanged", listener);
+  },
+  onRealtimeStatusChange: (
+    callback: (payload: {
+      state: "disabled" | "connecting" | "connected" | "reconnecting" | "error";
+      message: string;
+      updatedAt: number;
+    }) => void
+  ) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+      callback(payload as {
+        state: "disabled" | "connecting" | "connected" | "reconnecting" | "error";
+        message: string;
+        updatedAt: number;
+      });
+    };
+    ipcRenderer.on("messages:realtimeStatus", listener);
+    return () => ipcRenderer.removeListener("messages:realtimeStatus", listener);
+  },
 });
 
 contextBridge.exposeInMainWorld("authBridge", {
   beginAppCreation: () => ipcRenderer.invoke("auth:beginAppCreation"),
   pollAppCreation: (deviceCode: string, brand?: "feishu" | "lark") =>
     ipcRenderer.invoke("auth:pollAppCreation", deviceCode, brand),
-  openAuthWindow: (url: string) => ipcRenderer.invoke("auth:openAuthWindow", url),
+  openAuthWindow: (url: string, title?: string) => ipcRenderer.invoke("auth:openAuthWindow", url, title),
   closeAuthWindow: () => ipcRenderer.invoke("auth:closeAuthWindow"),
   onAuthWindowClosed: (callback: () => void) => {
     const listener = () => callback();

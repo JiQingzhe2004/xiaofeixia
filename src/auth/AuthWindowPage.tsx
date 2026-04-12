@@ -2,9 +2,12 @@ import { Box, CircularProgress, Typography } from "@mui/material";
 import { WindowDragRegion, TITLEBAR_HEIGHT } from "../components/windowChrome";
 
 export default function AuthWindowPage() {
+  const searchParams = new URLSearchParams(window.location.search);
+  const title = searchParams.get("title") || "授权";
+
   return (
     <>
-      <WindowDragRegion />
+      <WindowDragRegion title={title} />
       <Box
         sx={{
           pt: window.appWindow?.customTitleBar ? `${TITLEBAR_HEIGHT}px` : 0,
@@ -24,7 +27,7 @@ export default function AuthWindowPage() {
           }}
         >
           <CircularProgress size={24} />
-          <Typography variant="body2">正在载入授权页面...</Typography>
+          <Typography variant="body2">正在载入页面...</Typography>
         </Box>
       </Box>
     </>
