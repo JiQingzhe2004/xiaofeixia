@@ -49,6 +49,8 @@ contextBridge.exposeInMainWorld("messagesBridge", {
     sort?: "asc" | "desc";
     identity?: "user" | "bot" | "auto";
   }) => ipcRenderer.invoke("messages:listChatMessages", params),
+  exportChatLab: (conversation: Record<string, unknown>) =>
+    ipcRenderer.invoke("messages:exportChatLab", conversation),
   onIncomingMessage: (
     callback: (payload: {
       eventType: "im.message.receive_v1";

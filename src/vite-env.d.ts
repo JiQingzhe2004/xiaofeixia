@@ -55,6 +55,7 @@ interface MessageConversationItem {
   chatId?: string;
   userOpenId?: string;
   source: "user" | "bot" | "mixed";
+  contactCategory?: "directory" | "discovered";
 }
 
 interface MessageItem {
@@ -63,6 +64,8 @@ interface MessageItem {
   senderName?: string;
   senderAvatarUrl?: string;
   senderOpenId?: string;
+  senderType?: string;
+  isCurrentBot?: boolean;
   isSelf?: boolean;
   messageType: string;
   contentText: string;
@@ -109,6 +112,13 @@ interface MessagesBridge {
     sort?: "asc" | "desc";
     identity?: "user" | "bot" | "auto";
   }) => Promise<{ items: MessageItem[]; hasMore: boolean; pageToken?: string }>;
+  exportChatLab: (conversation: MessageConversationItem) => Promise<{
+    canceled: boolean;
+    filePath?: string;
+    fileName?: string;
+    format?: "json" | "jsonl";
+    messageCount?: number;
+  }>;
   onIncomingMessage: (callback: (payload: RealtimeMessageItem) => void) => () => void;
   onConversationChanged: (callback: (payload: RealtimeConversationChangedItem) => void) => () => void;
   onRealtimeStatusChange: (callback: (payload: RealtimeConnectionStatus) => void) => () => void;

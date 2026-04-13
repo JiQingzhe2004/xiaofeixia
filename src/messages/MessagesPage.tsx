@@ -21,6 +21,7 @@ import {
 } from "@mui/material";
 import {
   AlertTriangle,
+  Download,
   LoaderCircle,
   MessageCircleMore,
   Search,
@@ -28,6 +29,8 @@ import {
   WifiOff,
 } from "lucide-react";
 import fallbackAvatar from "../../resources/icons/Avatar.png";
+import appIcon from "../../resources/icons/icon_1024.png";
+import { useNotice } from "../components/notice/NoticeCenter";
 
 const DEFAULT_LIST_WIDTH = 332;
 const MIN_LIST_WIDTH = 260;
@@ -46,6 +49,7 @@ type MessageConversation = {
   chatId?: string;
   userOpenId?: string;
   source: "user" | "bot" | "mixed";
+  contactCategory?: "directory" | "discovered";
 };
 type MessageRecord = {
   messageId: string;
@@ -53,6 +57,8 @@ type MessageRecord = {
   senderName?: string;
   senderAvatarUrl?: string;
   senderOpenId?: string;
+  senderType?: string;
+  isCurrentBot?: boolean;
   isSelf?: boolean;
   messageType: string;
   contentText: string;
@@ -80,6 +86,12 @@ type IncomingConversationChange = {
   title?: string;
   avatarUrl?: string;
   lastMessageAt?: number;
+};
+type ContactSection = {
+  key: "directory" | "discovered";
+  title: string;
+  description: string;
+  items: MessageConversation[];
 };
 
 function EmptyState(props: { title: string; description: string; action?: React.ReactNode }) {
@@ -212,7 +224,8 @@ function areConversationListsEqual(
       item.avatarUrl === target.avatarUrl &&
       item.chatId === target.chatId &&
       item.userOpenId === target.userOpenId &&
-      item.source === target.source
+      item.source === target.source &&
+      item.contactCategory === target.contactCategory
     );
   });
 }
@@ -255,6 +268,32 @@ function getConversationSourceMeta(conversation: MessageConversation) {
     color: "default" as const,
     subtitle: conversation.type === "p2p" ? "私聊会话" : "群聊会话",
   };
+}
+
+function buildContactSections(items: MessageConversation[]): ContactSection[] {
+  const directoryItems = items.filter((item) => item.contactCategory !== "discovered");
+  const discoveredItems = items.filter((item) => item.contactCategory === "discovered");
+  const sections: ContactSection[] = [];
+
+  if (directoryItems.length > 0) {
+    sections.push({
+      key: "directory",
+      title: "官方通讯录",
+      description: "来自飞书通讯录接口和用户搜索。",
+      items: directoryItems,
+    });
+  }
+
+  if (discoveredItems.length > 0) {
+    sections.push({
+      key: "discovered",
+      title: "会话发现",
+      description: "只包含已经在私聊、最近消息或机器人会话里出现过的人。",
+      items: discoveredItems,
+    });
+  }
+
+  return sections;
 }
 
 function areMessageListsEqual(current: MessageRecord[], next: MessageRecord[]) {
@@ -328,6 +367,10 @@ function upsertConversationItem(
     ...item,
     subtitle: item.subtitle || currentItem.subtitle,
     source: mergeConversationSource(currentItem.source, item.source),
+    contactCategory:
+      currentItem.contactCategory === "directory" || item.contactCategory === "directory"
+        ? "directory"
+        : currentItem.contactCategory || item.contactCategory,
   });
   return nextItems;
 }
@@ -401,6 +444,7 @@ function RealtimeStatusIndicator(props: { status: RealtimeStatus }) {
 }
 
 export default function MessagesPage() {
+  const { pushNotice } = useNotice();
   const [browseMode, setBrowseMode] = useState<BrowseMode>("contacts");
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
@@ -437,6 +481,7 @@ export default function MessagesPage() {
     title: string;
     description: string;
   } | null>(null);
+  const [exportingChatLab, setExportingChatLab] = useState(false);
   const [realtimeStatus, setRealtimeStatus] = useState<RealtimeStatus>({
     state: "disabled",
     message: "实时连接未启用",
@@ -845,6 +890,7 @@ export default function MessagesPage() {
         chatId: payload.chatId,
         userOpenId: payload.userOpenId,
         source: "bot",
+        contactCategory: "discovered",
       };
 
       if (browseModeRef.current === "contacts" && !browseQueryRef.current) {
@@ -883,6 +929,12 @@ export default function MessagesPage() {
   }, [selectedConversation]);
 
   const renderedMessages = useMemo(() => [...messages].reverse(), [messages]);
+  const contactSections = useMemo(() => {
+    if (browseMode !== "contacts") {
+      return [] as ContactSection[];
+    }
+    return buildContactSections(items);
+  }, [browseMode, items]);
 
   function tryLoadOlderMessages() {
     if (
@@ -1057,6 +1109,86 @@ export default function MessagesPage() {
     await loadMessages(conversation);
   }
 
+  async function handleExportChatLab() {
+    if (!currentConversation || exportingChatLab) {
+      return;
+    }
+
+    setExportingChatLab(true);
+    try {
+      const result = await window.messagesBridge?.exportChatLab(currentConversation);
+      if (!result || result.canceled) {
+        return;
+      }
+
+      pushNotice(
+        `已导出 ${result.messageCount || 0} 条消息到 ${result.fileName || "ChatLab 文件"}`,
+        {
+          severity: "success",
+          duration: 4200,
+        }
+      );
+    } catch (error) {
+      pushNotice(error instanceof Error ? error.message : String(error), {
+        severity: "error",
+        duration: 4200,
+      });
+    } finally {
+      setExportingChatLab(false);
+    }
+  }
+
+  function renderBrowseListItem(item: MessageConversation) {
+    return (
+      <Box key={item.id}>
+        <ListItemButton
+          onClick={() => void handleSelectConversation(item)}
+          selected={selectedConversation?.id === item.id}
+          sx={{
+            px: 1.25,
+            py: 1.1,
+            borderRadius: 1.75,
+            mb: 0.5,
+          }}
+        >
+          <ListItemAvatar>
+            <Avatar src={item.avatarUrl || fallbackAvatar} alt={item.title} />
+          </ListItemAvatar>
+          <ListItemText
+            primary={item.title}
+            secondary={
+              browseMode === "contacts"
+                ? p2pUnavailableMap[item.id]
+                  ? "尚未建立私聊会话"
+                  : item.subtitle || (item.contactCategory === "discovered" ? "会话发现" : "联系人")
+                : item.subtitle || " "
+            }
+            primaryTypographyProps={{ noWrap: true, fontWeight: 600 }}
+            secondaryTypographyProps={{ noWrap: true }}
+          />
+          {browseMode === "contacts" && item.contactCategory === "discovered" ? (
+            <Chip
+              size="small"
+              label="会话发现"
+              color="warning"
+              variant="outlined"
+              sx={{ ml: 1 }}
+            />
+          ) : null}
+          {browseMode === "chats" && item.source !== "user" && (
+            <Chip
+              size="small"
+              label={getConversationSourceMeta(item).label}
+              color={getConversationSourceMeta(item).color}
+              variant="filled"
+              sx={{ ml: 1 }}
+            />
+          )}
+        </ListItemButton>
+      </Box>
+    );
+  }
+
   return (
     <Box
       ref={containerRef}
@@ -1131,6 +1263,14 @@ export default function MessagesPage() {
           </Stack>
         </Box>
 
+        {browseMode === "contacts" && (
+          <Box sx={{ px: 2, pb: 1 }}>
+            <Typography variant="caption" color="text.secondary">
+              这里只展示官方通讯录，以及已经在私聊或机器人会话里出现过的人。外部联系人不会自动全量列出。
+            </Typography>
+          </Box>
+        )}
+
         <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", px: 1, pb: 1 }}>
           {listLoading ? (
             <Stack spacing={1} sx={{ p: 1 }}>
@@ -1147,53 +1287,37 @@ export default function MessagesPage() {
               title={trimmedQuery ? "没有匹配结果" : browseMode === "contacts" ? "暂无联系人" : "暂无会话"}
               description={
                 trimmedQuery
-                  ? "换个关键词试试，或者切换到另一个列表。"
+                  ? browseMode === "contacts"
+                    ? "这个关键词没有命中当前可见的通讯录，也没有命中已发现的会话联系人。"
+                    : "换个关键词试试，或者切换到另一个列表。"
                   : browseMode === "contacts"
-                    ? "当前登录下还没有可见的联系人列表。"
+                    ? "当前登录下还没有可见的官方通讯录，也还没有从会话里发现联系人。"
                     : "当前登录下还没有可见的会话列表。"
               }
             />
-          ) : (
+          ) : browseMode === "contacts" ? (
             <List disablePadding>
-              {items.map((item) => (
-                <Box key={item.id}>
-                  <ListItemButton
-                    onClick={() => void handleSelectConversation(item)}
-                    selected={selectedConversation?.id === item.id}
-                    sx={{
-                      px: 1.25,
-                      py: 1.1,
-                      borderRadius: 1.75,
-                      mb: 0.5,
-                    }}
-                  >
-                    <ListItemAvatar>
-                      <Avatar src={item.avatarUrl || fallbackAvatar} alt={item.title} />
-                    </ListItemAvatar>
-                    <ListItemText
-                      primary={item.title}
-                      secondary={
-                        browseMode === "contacts"
-                          ? p2pUnavailableMap[item.id]
-                            ? "尚未建立私聊会话"
-                            : item.subtitle || "联系人"
-                          : item.subtitle || " "
-                      }
-                      primaryTypographyProps={{ noWrap: true, fontWeight: 600 }}
-                      secondaryTypographyProps={{ noWrap: true }}
-                    />
-                    {browseMode === "chats" && item.source !== "user" && (
-                      <Chip
-                        size="small"
-                        label={getConversationSourceMeta(item).label}
-                        color={getConversationSourceMeta(item).color}
-                        variant="filled"
-                        sx={{ ml: 1 }}
-                      />
-                    )}
-                  </ListItemButton>
+              {contactSections.map((section) => (
+                <Box key={section.key} sx={{ mb: 1.25 }}>
+                  <Box sx={{ px: 1.25, pt: 0.75, pb: 0.9 }}>
+                    <Typography variant="caption" fontWeight={700} color="text.primary">
+                      {section.title}
+                    </Typography>
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{ display: "block", mt: 0.25 }}
+                    >
+                      {section.description}
+                    </Typography>
+                  </Box>
+                  {section.items.map((item) => renderBrowseListItem(item))}
                 </Box>
               ))}
+            </List>
+          ) : (
+            <List disablePadding>
+              {items.map((item) => renderBrowseListItem(item))}
             </List>
           )}
         </Box>
@@ -1268,7 +1392,7 @@ export default function MessagesPage() {
                 src={currentConversation.avatarUrl || fallbackAvatar}
                 alt={currentConversation.title}
               />
-              <Box sx={{ minWidth: 0 }}>
+              <Box sx={{ minWidth: 0, flex: 1 }}>
                 <Typography variant="subtitle1" fontWeight={700} noWrap>
                   {currentConversation.title}
                 </Typography>
@@ -1290,6 +1414,16 @@ export default function MessagesPage() {
                   )}
                 </Stack>
               </Box>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={exportingChatLab ? <LoaderCircle size={14} /> : <Download size={14} />}
+                onClick={() => void handleExportChatLab()}
+                disabled={exportingChatLab}
+                sx={{ borderRadius: 999, textTransform: "none", flexShrink: 0 }}
+              >
+                {exportingChatLab ? "导出中..." : "导出 ChatLab"}
+              </Button>
             </Box>
 
             <Divider />
@@ -1354,6 +1488,7 @@ export default function MessagesPage() {
                     const senderName = getMessageSenderName(message, currentConversation);
                     const avatarSrc =
                       message.senderAvatarUrl ||
+                      (message.isCurrentBot ? appIcon : undefined) ||
                       (currentConversation.type === "p2p"
                         ? currentConversation.avatarUrl
                         : undefined);

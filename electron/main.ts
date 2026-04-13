@@ -1,11 +1,16 @@
-import { app, BrowserWindow, Menu, WebContentsView, ipcMain, shell } from "electron";
+import { app, BrowserWindow, Menu, WebContentsView, dialog, ipcMain, shell } from "electron";
 import * as path from "node:path";
+import { createWriteStream } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import * as Lark from "@larksuiteoapi/node-sdk";
 import * as tokenStore from "./tokenStore";
 
 const TITLEBAR_HEIGHT = 40;
 type Brand = "feishu" | "lark";
 type ConversationSource = "user" | "bot" | "mixed";
+type ContactCategory = "directory" | "discovered";
+type MessageIdentity = "user" | "bot" | "auto";
+type ChatLabFormat = "json" | "jsonl";
 type ConversationListResult = {
   items: Array<{
     id: string;
@@ -16,9 +21,17 @@ type ConversationListResult = {
     chatId?: string;
     userOpenId: string;
     source: ConversationSource;
+    contactCategory?: ContactCategory;
   }>;
 };
 type ConversationListItem = ConversationListResult["items"][number];
+type ChatLabExportResult = {
+  canceled: boolean;
+  filePath?: string;
+  fileName?: string;
+  format?: ChatLabFormat;
+  messageCount?: number;
+};
 type ListChatMessagesResult = {
   items: Array<{
     messageId: string;
@@ -26,6 +39,8 @@ type ListChatMessagesResult = {
     senderName?: string;
     senderAvatarUrl?: string;
     senderOpenId?: string;
+    senderType?: string;
+    isCurrentBot?: boolean;
     isSelf?: boolean;
     messageType: string;
     contentText: string;
@@ -33,6 +48,11 @@ type ListChatMessagesResult = {
   }>;
   hasMore: boolean;
   pageToken?: string;
+};
+type RawChatMessagesPageResult = {
+  items?: Array<Record<string, unknown>>;
+  has_more?: boolean;
+  page_token?: string;
 };
 type RealtimeIncomingMessagePayload = {
   eventType: "im.message.receive_v1";
@@ -59,6 +79,12 @@ type RealtimeConnectionStatus = {
   updatedAt: number;
 };
 type UserProfileSummary = {
+  title: string;
+  avatarUrl?: string;
+};
+type BotProfileSummary = {
+  openId?: string;
+  appId: string;
   title: string;
   avatarUrl?: string;
 };
@@ -95,17 +121,37 @@ let messageWsClient: Lark.WSClient | null = null;
 let messageWsClientConfigKey = "";
 const userProfileCache = new Map<string, UserProfileSummary>();
 const userProfilePending = new Map<string, Promise<UserProfileSummary>>();
+const botProfileCache = new Map<string, BotProfileSummary>();
+const botProfilePending = new Map<string, Promise<BotProfileSummary>>();
 let realtimeConnectionStatus: RealtimeConnectionStatus = {
   state: "disabled",
   message: "实时连接未启用",
   updatedAt: Date.now(),
 };
 let recentUserP2PChatCache: RecentP2PConversationCache | null = null;
+let userP2PChatListCache: RecentP2PConversationCache | null = null;
+let silentUserSearchCache: RecentP2PConversationCache | null = null;
+let silentChatSearchCache: RecentP2PConversationCache | null = null;
+let silentUserSearchPending:
+  | {
+      key: string;
+      promise: Promise<ConversationListItem[]>;
+    }
+  | null = null;
+let silentChatSearchPending:
+  | {
+      key: string;
+      promise: Promise<ConversationListItem[]>;
+    }
+  | null = null;
 
 const RECENT_P2P_CHAT_PAGE_SIZE = 50;
 const RECENT_P2P_CHAT_MAX_PAGES = 4;
 const RECENT_P2P_CHAT_TARGET_COUNT = 24;
 const RECENT_P2P_CHAT_CACHE_TTL = 30 * 1000;
+const SILENT_SEARCH_INDEX_TTL = 10 * 60 * 1000;
+const SILENT_SEARCH_INDEX_CONCURRENCY = 4;
+const SILENT_SEARCH_QUERIES = "abcdefghijklmnopqrstuvwxyz".split("");
 
 function resolveBrand(brand: Brand = "feishu") {
   if (brand === "lark") {
@@ -258,6 +304,61 @@ async function getTenantAccessToken(params: {
   return token;
 }
 
+async function fetchCurrentBotProfile(params: {
+  brand: Brand;
+  appId: string;
+  appSecret: string;
+}): Promise<BotProfileSummary> {
+  const tenantAccessToken = await getTenantAccessToken(params);
+  const data = await callOpenApi<{
+    open_id?: string;
+    app_name?: string;
+    avatar?: Record<string, unknown>;
+    avatar_url?: string;
+  }>({
+    brand: params.brand,
+    accessToken: tenantAccessToken,
+    method: "GET",
+    apiPath: "/open-apis/bot/v3/info",
+  });
+
+  return {
+    openId: String(data.open_id || "") || undefined,
+    appId: params.appId,
+    title: String(data.app_name || params.appId),
+    avatarUrl: extractAvatarUrl(data.avatar) || String(data.avatar_url || "") || undefined,
+  };
+}
+
+async function getCurrentBotProfile(params: {
+  brand: Brand;
+  appId: string;
+  appSecret: string;
+}) {
+  const cacheKey = `${params.brand}:${params.appId}`;
+  const cachedProfile = botProfileCache.get(cacheKey);
+  if (cachedProfile) {
+    return cachedProfile;
+  }
+
+  const pendingProfile = botProfilePending.get(cacheKey);
+  if (pendingProfile) {
+    return pendingProfile;
+  }
+
+  const profilePromise = fetchCurrentBotProfile(params)
+    .then((profile) => {
+      botProfileCache.set(cacheKey, profile);
+      return profile;
+    })
+    .finally(() => {
+      botProfilePending.delete(cacheKey);
+    });
+
+  botProfilePending.set(cacheKey, profilePromise);
+  return profilePromise;
+}
+
 async function refreshUserAccessToken() {
   const authContext = getAuthContext();
   if (!authContext.refreshToken) {
@@ -407,6 +508,13 @@ function getSenderOpenId(sender: Record<string, unknown> | undefined) {
   return typeof openId === "string" ? openId : "";
 }
 
+function getSenderAppId(sender: Record<string, unknown> | undefined) {
+  const senderId = sender?.sender_id;
+  if (!senderId || typeof senderId !== "object") return "";
+  const appId = (senderId as Record<string, unknown>).app_id;
+  return typeof appId === "string" ? appId : "";
+}
+
 function extractAvatarUrl(source: unknown) {
   if (typeof source === "string") {
     return source;
@@ -450,6 +558,7 @@ function normalizeUserConversation(user: Record<string, unknown>): ConversationL
     avatarUrl: extractAvatarUrl(user.avatar) || undefined,
     userOpenId: openId,
     source: "user",
+    contactCategory: "directory",
   };
 }
 
@@ -478,6 +587,7 @@ function normalizeChatConversation(
     chatId: chatId || undefined,
     userOpenId: userOpenId || "",
     source,
+    contactCategory: type === "p2p" ? "discovered" : undefined,
   };
 }
 
@@ -491,6 +601,7 @@ function normalizeBotRecentChat(chat: tokenStore.BotRecentChat): ConversationLis
     chatId: chat.chatId,
     userOpenId: chat.userOpenId,
     source: "bot",
+    contactCategory: "discovered",
   };
 }
 
@@ -548,6 +659,16 @@ function mergeConversationSource(
   return "mixed";
 }
 
+function mergeContactCategory(
+  left?: ContactCategory,
+  right?: ContactCategory
+): ContactCategory | undefined {
+  if (left === "directory" || right === "directory") {
+    return "directory";
+  }
+  return left || right;
+}
+
 function isLikelyUserOpenId(value?: string) {
   return /^ou_[a-z0-9]+$/i.test(String(value || "").trim());
 }
@@ -591,6 +712,7 @@ function mergeConversationItem(base: ConversationListItem, incoming: Conversatio
     chatId: primary.chatId || secondary.chatId,
     userOpenId: primary.userOpenId || secondary.userOpenId,
     source: mergeConversationSource(base.source, incoming.source),
+    contactCategory: mergeContactCategory(base.contactCategory, incoming.contactCategory),
   };
 }
 
@@ -876,6 +998,177 @@ function parseRawTimestamp(rawValue: string) {
   return rawValue.length >= 13 ? numericValue : numericValue * 1000;
 }
 
+function toUnixTimestampSeconds(rawValue: unknown) {
+  const timestamp = parseRawTimestamp(String(rawValue || ""));
+  return timestamp ? Math.floor(timestamp / 1000) : Math.floor(Date.now() / 1000);
+}
+
+function sanitizeExportFileName(value: string) {
+  const trimmed = value.trim();
+  const safe = trimmed.replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "_").replace(/\s+/g, " ").trim();
+  return safe || "chatlab-export";
+}
+
+function detectChatLabFormat(filePath: string) {
+  const lowerPath = filePath.toLowerCase();
+  if (lowerPath.endsWith(".jsonl")) {
+    return "jsonl" as const;
+  }
+  if (lowerPath.endsWith(".json")) {
+    return "json" as const;
+  }
+  return "json";
+}
+
+function getChatLabMessageType(messageType: string) {
+  switch (messageType) {
+    case "text":
+    case "post":
+      return 0;
+    case "image":
+      return 1;
+    case "audio":
+      return 2;
+    case "media":
+    case "video":
+      return 3;
+    case "file":
+      return 4;
+    case "sticker":
+      return 5;
+    case "interactive":
+      return 7;
+    case "location":
+      return 8;
+    case "share_chat":
+      return 24;
+    case "share_user":
+      return 27;
+    case "merge_forward":
+      return 26;
+    case "system":
+      return 80;
+    default:
+      return 99;
+  }
+}
+
+function getChatLabMessageContent(messageType: string, rawContent: unknown) {
+  const content = parseMessageContent(messageType, rawContent).trim();
+  return content || null;
+}
+
+function getReplyToMessageId(item: Record<string, unknown>) {
+  return String(item.parent_id || item.reply_to_message_id || item.root_id || "") || undefined;
+}
+
+function getRawSenderId(sender: Record<string, unknown> | undefined) {
+  return String(sender?.id || "");
+}
+
+type ChatLabMemberRecord = {
+  platformId: string;
+  accountName: string;
+  groupNickname?: string;
+  aliases?: string[];
+  avatar?: string;
+  roles?: Array<{ id: string; name?: string }>;
+};
+
+type ChatLabMessageRecord = {
+  sender: string;
+  accountName: string;
+  groupNickname?: string;
+  timestamp: number;
+  type: number;
+  content: string | null;
+  platformMessageId?: string;
+  replyToMessageId?: string;
+};
+
+type ChatLabExportContext = {
+  brand: Brand;
+  currentUserName: string;
+  currentUserOpenId: string;
+  currentUserAvatarUrl?: string;
+  currentBotProfile: BotProfileSummary | null;
+  identity: MessageIdentity;
+};
+
+async function resolveChatLabMemberFromMessage(params: {
+  item: Record<string, unknown>;
+  context: ChatLabExportContext;
+}) {
+  const sender = ((params.item.sender as Record<string, unknown> | undefined) || {}) as Record<
+    string,
+    unknown
+  >;
+  const senderType = String(sender.sender_type || "");
+  const senderOpenId = getSenderOpenId(sender);
+  const senderAppId = getSenderAppId(sender);
+  const senderId = getRawSenderId(sender);
+  const senderName = String(
+    sender.name || sender.user_name || sender.display_name || sender.sender_name || ""
+  );
+  const senderAvatarUrl = extractAvatarUrl(sender.avatar) || undefined;
+
+  if (senderType === "app") {
+    const platformId =
+      params.context.currentBotProfile?.openId || senderAppId || senderId || "app:unknown";
+    return {
+      platformId,
+      accountName:
+        senderName || params.context.currentBotProfile?.title || senderAppId || senderId || platformId,
+      avatar: senderAvatarUrl || params.context.currentBotProfile?.avatarUrl,
+    } satisfies ChatLabMemberRecord;
+  }
+
+  if (senderOpenId && senderOpenId === params.context.currentUserOpenId) {
+    return {
+      platformId: senderOpenId,
+      accountName: params.context.currentUserName || senderName || senderOpenId,
+      avatar: params.context.currentUserAvatarUrl || senderAvatarUrl,
+    } satisfies ChatLabMemberRecord;
+  }
+
+  if (senderOpenId) {
+    const profile = await getCachedUserProfileByOpenId(senderOpenId);
+    return {
+      platformId: senderOpenId,
+      accountName: senderName || profile.title || senderOpenId,
+      avatar: senderAvatarUrl || profile.avatarUrl,
+    } satisfies ChatLabMemberRecord;
+  }
+
+  const fallbackId = senderId || senderAppId || `unknown:${String(params.item.message_id || "")}`;
+  return {
+    platformId: fallbackId,
+    accountName: senderName || fallbackId,
+    avatar: senderAvatarUrl,
+  } satisfies ChatLabMemberRecord;
+}
+
+function mergeChatLabMember(
+  base: ChatLabMemberRecord | undefined,
+  incoming: ChatLabMemberRecord
+): ChatLabMemberRecord {
+  if (!base) {
+    return incoming;
+  }
+
+  return {
+    ...base,
+    accountName:
+      base.accountName && !isLikelyUserOpenId(base.accountName)
+        ? base.accountName
+        : incoming.accountName || base.accountName,
+    groupNickname: base.groupNickname || incoming.groupNickname,
+    aliases: base.aliases || incoming.aliases,
+    avatar: base.avatar || incoming.avatar,
+    roles: base.roles || incoming.roles,
+  };
+}
+
 async function persistBotRecentChatFromRealtimeMessage(payload: RealtimeIncomingMessagePayload) {
   if (payload.chatType !== "p2p" || !payload.senderOpenId) {
     return;
@@ -1014,6 +1307,34 @@ async function collectPagedItems(
   } while (pageToken && page < maxPages);
 
   return items;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>
+) {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+
+  const runWorker = async () => {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= items.length) {
+        return;
+      }
+      results[index] = await worker(items[index], index);
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.min(concurrency, items.length || 1)) }, () =>
+      runWorker()
+    )
+  );
+
+  return results;
 }
 
 function chunkStrings(items: string[], chunkSize: number) {
@@ -1284,6 +1605,7 @@ async function loadRecentUserP2PChats() {
         chatId: item.chatId,
         userOpenId: item.userOpenId,
         source: "user" as const,
+        contactCategory: "discovered" as const,
       };
     });
 
@@ -1303,6 +1625,169 @@ async function loadOptionalRecentUserP2PChats(query?: string) {
     console.warn("[Messages] 加载用户 P2P 会话失败", error);
     return [] as ConversationListItem[];
   }
+}
+
+function extractP2PConversationItems(items: ConversationListItem[]) {
+  return items.filter((item) => item.type === "p2p" && !!item.userOpenId);
+}
+
+async function loadUserP2PChatsFromChatList() {
+  const { brand, accessToken, scope, currentUserOpenId } = getAuthContext();
+  if (!hasScopes(scope, ["im:chat:read"])) {
+    return [] as ConversationListItem[];
+  }
+
+  const cacheKey = `${brand}:${currentUserOpenId || "anonymous"}`;
+  if (userP2PChatListCache?.key === cacheKey && userP2PChatListCache.expiresAt > Date.now()) {
+    return userP2PChatListCache.items;
+  }
+
+  const items = extractP2PConversationItems(
+    (await loadUserChatList(brand, accessToken)).map((item) => normalizeChatConversation(item, "user"))
+  );
+  userP2PChatListCache = {
+    key: cacheKey,
+    items,
+    expiresAt: Date.now() + RECENT_P2P_CHAT_CACHE_TTL,
+  };
+  return items;
+}
+
+async function loadOptionalUserP2PChatsFromChatList(query?: string) {
+  try {
+    const items = await loadUserP2PChatsFromChatList();
+    return query ? items.filter((item) => matchesConversationQuery(item, query)) : items;
+  } catch (error) {
+    console.warn("[Messages] 加载用户私聊会话列表失败", error);
+    return [] as ConversationListItem[];
+  }
+}
+
+function getSilentSearchCacheKey() {
+  const { brand, currentUserOpenId, scope } = getAuthContext();
+  return `${brand}:${currentUserOpenId || "anonymous"}:${scope || ""}`;
+}
+
+async function buildSilentUserSearchIndex() {
+  const { brand, accessToken, scope } = getAuthContext();
+  if (!hasScopes(scope, ["contact:user:search"])) {
+    return [] as ConversationListItem[];
+  }
+
+  const groups = await mapWithConcurrency(
+    SILENT_SEARCH_QUERIES,
+    SILENT_SEARCH_INDEX_CONCURRENCY,
+    async (query) => {
+      try {
+        const data = await callOpenApiWithRefresh<{ users?: Array<Record<string, unknown>> }>({
+          brand,
+          accessToken,
+          method: "GET",
+          apiPath: "/open-apis/search/v1/user",
+          query: {
+            query,
+            page_size: 100,
+          },
+        });
+        return (data.users || []).map(normalizeUserConversation).filter((item) => !!item.userOpenId);
+      } catch (error) {
+        console.warn(`[Messages] 静默搜索用户失败: ${query}`, error);
+        return [] as ConversationListItem[];
+      }
+    }
+  );
+
+  return mergeConversationLists(groups.flat()).filter((item) => !!item.userOpenId);
+}
+
+async function getSilentUserSearchIndex(options?: { waitForReady?: boolean }) {
+  const cacheKey = getSilentSearchCacheKey();
+  if (silentUserSearchCache?.key === cacheKey && silentUserSearchCache.expiresAt > Date.now()) {
+    return silentUserSearchCache.items;
+  }
+
+  if (!silentUserSearchPending || silentUserSearchPending.key !== cacheKey) {
+    const promise = buildSilentUserSearchIndex()
+      .then((items) => {
+        silentUserSearchCache = {
+          key: cacheKey,
+          items,
+          expiresAt: Date.now() + SILENT_SEARCH_INDEX_TTL,
+        };
+        return items;
+      })
+      .finally(() => {
+        if (silentUserSearchPending?.key === cacheKey) {
+          silentUserSearchPending = null;
+        }
+      });
+    silentUserSearchPending = {
+      key: cacheKey,
+      promise,
+    };
+  }
+
+  if (options?.waitForReady) {
+    return silentUserSearchPending.promise;
+  }
+  return silentUserSearchCache?.key === cacheKey ? silentUserSearchCache.items : [];
+}
+
+async function buildSilentChatSearchIndex() {
+  const { brand, accessToken, scope } = getAuthContext();
+  if (!hasScopes(scope, ["im:chat:read"])) {
+    return [] as ConversationListItem[];
+  }
+
+  const groups = await mapWithConcurrency(
+    SILENT_SEARCH_QUERIES,
+    SILENT_SEARCH_INDEX_CONCURRENCY,
+    async (query) => {
+      try {
+        return (await searchUserChats(brand, accessToken, query, { pageSize: 100 })).filter(
+          isChatListConversation
+        );
+      } catch (error) {
+        console.warn(`[Messages] 静默搜索会话失败: ${query}`, error);
+        return [] as ConversationListItem[];
+      }
+    }
+  );
+
+  return mergeConversationLists(groups.flat()).filter(isChatListConversation);
+}
+
+async function getSilentChatSearchIndex(options?: { waitForReady?: boolean }) {
+  const cacheKey = getSilentSearchCacheKey();
+  if (silentChatSearchCache?.key === cacheKey && silentChatSearchCache.expiresAt > Date.now()) {
+    return silentChatSearchCache.items;
+  }
+
+  if (!silentChatSearchPending || silentChatSearchPending.key !== cacheKey) {
+    const promise = buildSilentChatSearchIndex()
+      .then((items) => {
+        silentChatSearchCache = {
+          key: cacheKey,
+          items,
+          expiresAt: Date.now() + SILENT_SEARCH_INDEX_TTL,
+        };
+        return items;
+      })
+      .finally(() => {
+        if (silentChatSearchPending?.key === cacheKey) {
+          silentChatSearchPending = null;
+        }
+      });
+    silentChatSearchPending = {
+      key: cacheKey,
+      promise,
+    };
+  }
+
+  if (options?.waitForReady) {
+    return silentChatSearchPending.promise;
+  }
+  return silentChatSearchCache?.key === cacheKey ? silentChatSearchCache.items : [];
 }
 
 async function loadUserChatList(brand: Brand, accessToken: string) {
@@ -1356,18 +1841,39 @@ async function loadBotChatList(brand: Brand, clientId: string, clientSecret: str
   }
 }
 
-async function searchUserChats(brand: Brand, accessToken: string, query: string) {
+async function searchUserChats(
+  brand: Brand,
+  accessToken: string,
+  query: string,
+  options?: {
+    pageSize?: number;
+    searchTypes?: string[];
+    disableSearchByUser?: boolean;
+  }
+) {
+  const pageSize = Math.min(100, Math.max(1, options?.pageSize || 20));
+  const body: Record<string, unknown> = {
+    query: normalizeChatSearchQuery(query),
+  };
+  const filter: Record<string, unknown> = {};
+  if (options?.searchTypes?.length) {
+    filter.search_types = options.searchTypes;
+  }
+  if (options?.disableSearchByUser) {
+    filter.disable_search_by_user = true;
+  }
+  if (Object.keys(filter).length > 0) {
+    body.filter = filter;
+  }
   const data = await callOpenApiWithRefresh<{ items?: Array<Record<string, unknown>> }>({
     brand,
     accessToken,
     method: "POST",
     apiPath: "/open-apis/im/v2/chats/search",
     query: {
-      page_size: 20,
+      page_size: pageSize,
     },
-    body: {
-      query: normalizeChatSearchQuery(query),
-    },
+    body,
   });
 
   return (data.items || []).map((item) => normalizeChatConversation(item, "user"));
@@ -1403,16 +1909,23 @@ async function searchBotChats(brand: Brand, clientId: string, clientSecret: stri
 async function searchUsers(query: string): Promise<ConversationListResult> {
   const { brand, accessToken, scope } = getAuthContext();
   ensureScopes(scope, ["contact:user:search"]);
-  const data = await callOpenApiWithRefresh<{ users?: Array<Record<string, unknown>> }>({
-    brand,
-    accessToken,
-    method: "GET",
-    apiPath: "/open-apis/search/v1/user",
-    query: {
-      query,
-      page_size: 20,
-    },
-  });
+  const [data, userChatP2PItems, recentUserP2PItems, silentUserItems] = await Promise.all([
+    callOpenApiWithRefresh<{ users?: Array<Record<string, unknown>> }>({
+      brand,
+      accessToken,
+      method: "GET",
+      apiPath: "/open-apis/search/v1/user",
+      query: {
+        query,
+        page_size: 20,
+      },
+    }),
+    hasScopes(scope, ["im:chat:read"])
+      ? searchUserChats(brand, accessToken, query).then(extractP2PConversationItems)
+      : Promise.resolve([] as ConversationListItem[]),
+    loadOptionalRecentUserP2PChats(query),
+    getSilentUserSearchIndex(),
+  ]);
 
   const items = (data.users || []).map(normalizeUserConversation);
   const botRecentItems = tokenStore
@@ -1420,43 +1933,65 @@ async function searchUsers(query: string): Promise<ConversationListResult> {
     .map(normalizeBotRecentChat)
     .filter((item) => matchesConversationQuery(item, query));
 
-  return { items: mergeContactItems(items.filter((item) => item.userOpenId), botRecentItems) };
+  return {
+    items: mergeConversationLists([
+      ...items.filter((item) => item.userOpenId),
+      ...userChatP2PItems,
+      ...recentUserP2PItems,
+      ...silentUserItems.filter((item) => matchesConversationQuery(item, query)),
+      ...botRecentItems,
+    ]).filter((item) => !!item.userOpenId),
+  };
 }
 
 async function listContacts(): Promise<ConversationListResult> {
   const { brand, accessToken, scope } = getAuthContext();
   ensureScopes(scope, ["contact:contact.base:readonly"]);
-  const users = await collectPagedItems((pageToken) =>
-    callOpenApiWithRefresh<{
-      items?: Array<Record<string, unknown>>;
-      has_more?: boolean;
-      page_token?: string;
-    }>({
-      brand,
-      accessToken,
-      method: "GET",
-      apiPath: "/open-apis/contact/v3/users",
-      query: {
-        user_id_type: "open_id",
-        page_size: 100,
-        page_token: pageToken,
-      },
-    })
-  );
+  const [users, userChatP2PItems, recentUserP2PItems, silentUserItems] = await Promise.all([
+    collectPagedItems((pageToken) =>
+      callOpenApiWithRefresh<{
+        items?: Array<Record<string, unknown>>;
+        has_more?: boolean;
+        page_token?: string;
+      }>({
+        brand,
+        accessToken,
+        method: "GET",
+        apiPath: "/open-apis/contact/v3/users",
+        query: {
+          user_id_type: "open_id",
+          page_size: 100,
+          page_token: pageToken,
+        },
+      })
+    ),
+    loadOptionalUserP2PChatsFromChatList(),
+    loadOptionalRecentUserP2PChats(),
+    getSilentUserSearchIndex({ waitForReady: true }),
+  ]);
 
   const userItems = users.map(normalizeUserConversation).filter((item) => item.userOpenId);
   const botRecentItems = tokenStore.getBotRecentChats().map(normalizeBotRecentChat);
 
-  return { items: mergeContactItems(userItems, botRecentItems) };
+  return {
+    items: mergeConversationLists([
+      ...userItems,
+      ...userChatP2PItems,
+      ...recentUserP2PItems,
+      ...silentUserItems,
+      ...botRecentItems,
+    ]).filter((item) => !!item.userOpenId),
+  };
 }
 
 async function searchChats(query: string): Promise<ConversationListResult> {
   const { brand, accessToken, scope, clientId, clientSecret } = getAuthContext();
   ensureScopes(scope, ["im:chat:read"]);
-  const [userItems, botItems, recentUserP2PItems] = await Promise.all([
+  const [userItems, botItems, recentUserP2PItems, silentChatItems] = await Promise.all([
     searchUserChats(brand, accessToken, query),
     searchBotChats(brand, clientId, clientSecret, query),
     loadOptionalRecentUserP2PChats(query),
+    getSilentChatSearchIndex(),
   ]);
   const botRecentItems = tokenStore
     .getBotRecentChats()
@@ -1466,6 +2001,7 @@ async function searchChats(query: string): Promise<ConversationListResult> {
     ...userItems,
     ...botItems,
     ...recentUserP2PItems,
+    ...silentChatItems.filter((item) => matchesConversationQuery(item, query)),
     ...botRecentItems,
   ]).filter(isChatListConversation);
 
@@ -1475,10 +2011,11 @@ async function searchChats(query: string): Promise<ConversationListResult> {
 async function listChats(): Promise<ConversationListResult> {
   const { brand, accessToken, scope, clientId, clientSecret } = getAuthContext();
   ensureScopes(scope, ["im:chat:read"]);
-  const [userChats, botChats, recentUserP2PItems] = await Promise.all([
+  const [userChats, botChats, recentUserP2PItems, silentChatItems] = await Promise.all([
     loadUserChatList(brand, accessToken),
     loadBotChatList(brand, clientId, clientSecret),
     loadOptionalRecentUserP2PChats(),
+    getSilentChatSearchIndex({ waitForReady: true }),
   ]);
   const botRecentItems = tokenStore.getBotRecentChats().map(normalizeBotRecentChat);
 
@@ -1487,6 +2024,7 @@ async function listChats(): Promise<ConversationListResult> {
       ...userChats.map((item) => normalizeChatConversation(item, "user")),
       ...botChats.map((item) => normalizeChatConversation(item, "bot")),
       ...recentUserP2PItems,
+      ...silentChatItems,
       ...botRecentItems,
     ]).filter(isChatListConversation),
   };
@@ -1515,23 +2053,18 @@ async function resolveP2PChat(userOpenId: string) {
   return { chatId };
 }
 
-async function listChatMessages(params: {
+async function fetchChatMessagesPage(params: {
+  brand: Brand;
+  accessToken: string;
+  clientId: string;
+  clientSecret: string;
+  scope?: string;
   chatId: string;
   pageToken?: string;
   pageSize?: number;
   sort?: "asc" | "desc";
-  identity?: "user" | "bot" | "auto";
-}): Promise<ListChatMessagesResult> {
-  const {
-    brand,
-    accessToken,
-    currentUserName,
-    currentUserOpenId,
-    scope,
-    clientId,
-    clientSecret,
-    userInfo,
-  } = getAuthContext();
+  identity?: MessageIdentity;
+}): Promise<RawChatMessagesPageResult> {
   const pageSize = Math.min(50, Math.max(1, params.pageSize || 30));
   const identity = params.identity || "auto";
   const query = {
@@ -1544,14 +2077,10 @@ async function listChatMessages(params: {
   };
 
   const loadAsUser = async () => {
-    ensureScopes(scope, ["im:message.group_msg:get_as_user", "im:message.p2p_msg:get_as_user"]);
-    return callOpenApiWithRefresh<{
-      items?: Array<Record<string, unknown>>;
-      has_more?: boolean;
-      page_token?: string;
-    }>({
-      brand,
-      accessToken,
+    ensureScopes(params.scope, ["im:message.group_msg:get_as_user", "im:message.p2p_msg:get_as_user"]);
+    return callOpenApiWithRefresh<RawChatMessagesPageResult>({
+      brand: params.brand,
+      accessToken: params.accessToken,
       method: "GET",
       apiPath: "/open-apis/im/v1/messages",
       query,
@@ -1560,16 +2089,12 @@ async function listChatMessages(params: {
 
   const loadAsBot = async () => {
     const tenantAccessToken = await getTenantAccessToken({
-      brand,
-      appId: clientId,
-      appSecret: clientSecret,
+      brand: params.brand,
+      appId: params.clientId,
+      appSecret: params.clientSecret,
     });
-    return callOpenApi<{
-      items?: Array<Record<string, unknown>>;
-      has_more?: boolean;
-      page_token?: string;
-    }>({
-      brand,
+    return callOpenApi<RawChatMessagesPageResult>({
+      brand: params.brand,
       accessToken: tenantAccessToken,
       method: "GET",
       apiPath: "/open-apis/im/v1/messages",
@@ -1577,12 +2102,58 @@ async function listChatMessages(params: {
     });
   };
 
-  const data =
-    identity === "bot"
-      ? await loadAsBot()
-      : identity === "user"
-        ? await loadAsUser()
-        : await loadAsUser();
+  if (identity === "bot") {
+    return loadAsBot();
+  }
+  if (identity === "user") {
+    return loadAsUser();
+  }
+  return loadAsUser();
+}
+
+async function listChatMessages(params: {
+  chatId: string;
+  pageToken?: string;
+  pageSize?: number;
+  sort?: "asc" | "desc";
+  identity?: MessageIdentity;
+}): Promise<ListChatMessagesResult> {
+  const {
+    brand,
+    accessToken,
+    currentUserName,
+    currentUserOpenId,
+    scope,
+    clientId,
+    clientSecret,
+    userInfo,
+  } = getAuthContext();
+  const data = await fetchChatMessagesPage({
+    brand,
+    accessToken,
+    clientId,
+    clientSecret,
+    scope,
+    chatId: params.chatId,
+    pageToken: params.pageToken,
+    pageSize: params.pageSize,
+    sort: params.sort,
+    identity: params.identity,
+  });
+  const hasBotSender = (data.items || []).some((item) => {
+    const sender = (item.sender || {}) as Record<string, unknown>;
+    return String(sender.sender_type || "") === "app";
+  });
+  const currentBotProfile = hasBotSender
+    ? await getCurrentBotProfile({
+        brand,
+        appId: clientId,
+        appSecret: clientSecret,
+      }).catch((error) => {
+        console.warn("[Messages] 获取当前 Bot 信息失败", error);
+        return null;
+      })
+    : null;
   const mentionProfiles = extractSenderProfilesFromMentions(data.items || []);
 
   const senderOpenIds = Array.from(
@@ -1623,6 +2194,7 @@ async function listChatMessages(params: {
     const isSelf = !!senderOpenId && senderOpenId === currentUserOpenId;
     const senderId = String(sender.id || "");
     const senderType = String(sender.sender_type || "");
+    const senderAppId = getSenderAppId(sender);
     const senderNameFromPayload = String(
       sender.name || sender.user_name || sender.display_name || sender.sender_name || ""
     );
@@ -1638,17 +2210,29 @@ async function listChatMessages(params: {
     const messageType = String(item.msg_type || "");
     const body = (item.body || {}) as Record<string, unknown>;
     const senderProfile = senderOpenId ? senderProfiles.get(senderOpenId) : undefined;
+    const isCurrentBot =
+      senderType === "app" &&
+      !!currentBotProfile &&
+      (!!currentBotProfile.openId
+        ? senderId === currentBotProfile.openId ||
+          senderOpenId === currentBotProfile.openId ||
+          senderAppId === currentBotProfile.appId
+        : senderAppId === currentBotProfile.appId);
     const senderName =
       messageType === "system" && !senderOpenId && !senderNameFromPayload
         ? "系统"
         : isSelf
           ? currentUserName || "我"
           : senderNameFromPayload ||
+            (isCurrentBot ? currentBotProfile?.title : "") ||
             senderProfile?.title ||
-            (senderType === "app" ? "机器人应用" : senderOpenId || senderId || undefined);
+            (senderType === "app" ? senderId || "机器人应用" : senderOpenId || senderId || undefined);
     const resolvedAvatarUrl = isSelf
       ? userInfo?.avatarUrl || senderAvatarUrl || undefined
-      : senderAvatarUrl || senderProfile?.avatarUrl || undefined;
+      : senderAvatarUrl ||
+        (isCurrentBot ? currentBotProfile?.avatarUrl : undefined) ||
+        senderProfile?.avatarUrl ||
+        undefined;
 
     return {
       messageId: String(item.message_id || ""),
@@ -1656,6 +2240,8 @@ async function listChatMessages(params: {
       senderName,
       senderAvatarUrl: resolvedAvatarUrl,
       senderOpenId: senderOpenId || undefined,
+      senderType: senderType || undefined,
+      isCurrentBot,
       isSelf,
       messageType,
       contentText: parseMessageContent(messageType, body.content),
@@ -1667,6 +2253,306 @@ async function listChatMessages(params: {
     items,
     hasMore: !!data.has_more,
     pageToken: data.page_token ? String(data.page_token) : undefined,
+  };
+}
+
+function seedChatLabMembers(
+  memberMap: Map<string, ChatLabMemberRecord>,
+  conversation: ConversationListItem,
+  context: ChatLabExportContext
+) {
+  const upsert = (member: ChatLabMemberRecord | null) => {
+    if (!member?.platformId || !member.accountName) {
+      return;
+    }
+    memberMap.set(member.platformId, mergeChatLabMember(memberMap.get(member.platformId), member));
+  };
+
+  if (context.identity === "user" && context.currentUserOpenId) {
+    upsert({
+      platformId: context.currentUserOpenId,
+      accountName: context.currentUserName || context.currentUserOpenId,
+      avatar: context.currentUserAvatarUrl,
+    });
+  }
+
+  if (context.identity === "bot" && context.currentBotProfile) {
+    upsert({
+      platformId:
+        context.currentBotProfile.openId || context.currentBotProfile.appId || "app:current-bot",
+      accountName: context.currentBotProfile.title,
+      avatar: context.currentBotProfile.avatarUrl,
+    });
+  }
+
+  if (conversation.type === "p2p" && conversation.userOpenId) {
+    upsert({
+      platformId: conversation.userOpenId,
+      accountName: conversation.title || conversation.userOpenId,
+      avatar: conversation.avatarUrl,
+    });
+  }
+}
+
+function buildChatLabMessage(
+  item: Record<string, unknown>,
+  member: ChatLabMemberRecord
+): ChatLabMessageRecord {
+  const messageType = String(item.msg_type || "");
+  const body = ((item.body as Record<string, unknown> | undefined) || {}) as Record<string, unknown>;
+  const replyToMessageId = getReplyToMessageId(item);
+
+  return {
+    sender: member.platformId,
+    accountName: member.accountName,
+    ...(member.groupNickname ? { groupNickname: member.groupNickname } : {}),
+    timestamp: toUnixTimestampSeconds(item.create_time),
+    type: replyToMessageId ? 25 : getChatLabMessageType(messageType),
+    content: getChatLabMessageContent(messageType, body.content),
+    ...(item.message_id ? { platformMessageId: String(item.message_id) } : {}),
+    ...(replyToMessageId ? { replyToMessageId } : {}),
+  };
+}
+
+async function collectChatLabMembers(params: {
+  auth: ReturnType<typeof getAuthContext>;
+  conversation: ConversationListItem;
+  chatId: string;
+  identity: MessageIdentity;
+  currentBotProfile: BotProfileSummary | null;
+}) {
+  const memberMap = new Map<string, ChatLabMemberRecord>();
+  const context: ChatLabExportContext = {
+    brand: params.auth.brand,
+    currentUserName: params.auth.currentUserName,
+    currentUserOpenId: params.auth.currentUserOpenId,
+    currentUserAvatarUrl: params.auth.userInfo?.avatarUrl,
+    currentBotProfile: params.currentBotProfile,
+    identity: params.identity,
+  };
+
+  seedChatLabMembers(memberMap, params.conversation, context);
+
+  let pageToken = "";
+  do {
+    const data = await fetchChatMessagesPage({
+      brand: params.auth.brand,
+      accessToken: params.auth.accessToken,
+      clientId: params.auth.clientId,
+      clientSecret: params.auth.clientSecret,
+      scope: params.auth.scope,
+      chatId: params.chatId,
+      pageToken: pageToken || undefined,
+      pageSize: 50,
+      sort: "asc",
+      identity: params.identity,
+    });
+
+    for (const item of data.items || []) {
+      const member = await resolveChatLabMemberFromMessage({ item, context });
+      memberMap.set(member.platformId, mergeChatLabMember(memberMap.get(member.platformId), member));
+    }
+
+    pageToken = data.has_more && data.page_token ? String(data.page_token) : "";
+  } while (pageToken);
+
+  return memberMap;
+}
+
+async function exportChatLabConversation(
+  webContents: Electron.WebContents,
+  conversation: ConversationListItem
+): Promise<ChatLabExportResult> {
+  const auth = getAuthContext();
+  let chatId = conversation.chatId || "";
+  if (conversation.type === "p2p" && !chatId) {
+    if (!conversation.userOpenId) {
+      throw new Error("缺少联系人 open_id，无法导出私聊会话。");
+    }
+    const resolved = await resolveP2PChat(conversation.userOpenId);
+    chatId = resolved.chatId;
+  }
+  if (!chatId) {
+    throw new Error("未找到可导出的会话 ID。");
+  }
+
+  const identity: MessageIdentity = conversation.source === "bot" ? "bot" : "user";
+  const currentBotProfile =
+    conversation.source !== "user"
+      ? await getCurrentBotProfile({
+          brand: auth.brand,
+          appId: auth.clientId,
+          appSecret: auth.clientSecret,
+        }).catch(() => null)
+      : null;
+
+  const ownerWindow =
+    BrowserWindow.fromWebContents(webContents) ||
+    messagesWindow ||
+    mainWindow ||
+    undefined;
+  const defaultBaseName = sanitizeExportFileName(conversation.title);
+  const saveOptions = {
+    title: "导出 ChatLab",
+    defaultPath: path.join(app.getPath("downloads"), `${defaultBaseName}.json`),
+    filters: [
+      { name: "ChatLab JSON", extensions: ["json"] },
+      { name: "ChatLab JSONL", extensions: ["jsonl"] },
+    ],
+  };
+  const saveResult = ownerWindow
+    ? await dialog.showSaveDialog(ownerWindow, saveOptions)
+    : await dialog.showSaveDialog(saveOptions);
+
+  if (saveResult.canceled || !saveResult.filePath) {
+    return { canceled: true };
+  }
+
+  const format = detectChatLabFormat(saveResult.filePath);
+  const filePath = /\.[a-z0-9]+$/i.test(saveResult.filePath)
+    ? saveResult.filePath
+    : `${saveResult.filePath}.${format}`;
+  const exportedAt = Math.floor(Date.now() / 1000);
+  const generator = `xiaofeixia/${app.getVersion()}`;
+  const context: ChatLabExportContext = {
+    brand: auth.brand,
+    currentUserName: auth.currentUserName,
+    currentUserOpenId: auth.currentUserOpenId,
+    currentUserAvatarUrl: auth.userInfo?.avatarUrl,
+    currentBotProfile,
+    identity,
+  };
+  const meta = {
+    name: conversation.title,
+    platform: auth.brand,
+    type: conversation.type === "group" ? "group" : "private",
+    ...(conversation.type === "group" ? { groupId: chatId } : {}),
+    ...(conversation.type === "group" && conversation.avatarUrl
+      ? { groupAvatar: conversation.avatarUrl }
+      : {}),
+    ...(auth.currentUserOpenId ? { ownerId: auth.currentUserOpenId } : {}),
+  };
+
+  let messageCount = 0;
+
+  if (format === "jsonl") {
+    const memberMap = await collectChatLabMembers({
+      auth,
+      conversation,
+      chatId,
+      identity,
+      currentBotProfile,
+    });
+
+    const stream = createWriteStream(filePath, { encoding: "utf8" });
+    await new Promise<void>((resolve, reject) => {
+      stream.once("open", () => resolve());
+      stream.once("error", reject);
+    });
+
+    stream.write(
+      `${JSON.stringify({
+        _type: "header",
+        chatlab: {
+          version: "0.0.2",
+          exportedAt,
+          generator,
+          description: `ChatLab export from ${generator}`,
+        },
+        meta,
+      })}\n`
+    );
+
+    for (const member of memberMap.values()) {
+      stream.write(`${JSON.stringify({ _type: "member", ...member })}\n`);
+    }
+
+    let pageToken = "";
+    do {
+      const data = await fetchChatMessagesPage({
+        brand: auth.brand,
+        accessToken: auth.accessToken,
+        clientId: auth.clientId,
+        clientSecret: auth.clientSecret,
+        scope: auth.scope,
+        chatId,
+        pageToken: pageToken || undefined,
+        pageSize: 50,
+        sort: "asc",
+        identity,
+      });
+
+      for (const item of data.items || []) {
+        const member = await resolveChatLabMemberFromMessage({ item, context });
+        const message = buildChatLabMessage(item, member);
+        stream.write(`${JSON.stringify({ _type: "message", ...message })}\n`);
+        messageCount += 1;
+      }
+
+      pageToken = data.has_more && data.page_token ? String(data.page_token) : "";
+    } while (pageToken);
+
+    await new Promise<void>((resolve, reject) => {
+      stream.end(() => resolve());
+      stream.once("error", reject);
+    });
+  } else {
+    const memberMap = new Map<string, ChatLabMemberRecord>();
+    seedChatLabMembers(memberMap, conversation, context);
+    const messages: ChatLabMessageRecord[] = [];
+    let pageToken = "";
+
+    do {
+      const data = await fetchChatMessagesPage({
+        brand: auth.brand,
+        accessToken: auth.accessToken,
+        clientId: auth.clientId,
+        clientSecret: auth.clientSecret,
+        scope: auth.scope,
+        chatId,
+        pageToken: pageToken || undefined,
+        pageSize: 50,
+        sort: "asc",
+        identity,
+      });
+
+      for (const item of data.items || []) {
+        const member = await resolveChatLabMemberFromMessage({ item, context });
+        memberMap.set(member.platformId, mergeChatLabMember(memberMap.get(member.platformId), member));
+        messages.push(buildChatLabMessage(item, member));
+        messageCount += 1;
+      }
+
+      pageToken = data.has_more && data.page_token ? String(data.page_token) : "";
+    } while (pageToken);
+
+    await writeFile(
+      filePath,
+      JSON.stringify(
+        {
+          chatlab: {
+            version: "0.0.2",
+            exportedAt,
+            generator,
+            description: `ChatLab export from ${generator}`,
+          },
+          meta,
+          members: Array.from(memberMap.values()),
+          messages,
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+  }
+
+  return {
+    canceled: false,
+    filePath,
+    fileName: path.basename(filePath),
+    format,
+    messageCount,
   };
 }
 
@@ -1982,6 +2868,10 @@ ipcMain.handle(
 
 ipcMain.handle("messages:getRealtimeStatus", () => {
   return realtimeConnectionStatus;
+});
+
+ipcMain.handle("messages:exportChatLab", (event, conversation: ConversationListItem) => {
+  return exportChatLabConversation(event.sender, conversation);
 });
 
 ipcMain.handle("auth:openAuthWindow", (_event, url: string, title?: string) => {
