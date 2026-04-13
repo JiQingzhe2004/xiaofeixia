@@ -81,6 +81,7 @@ jobs:
     needs: build
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       RELEASE_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
 
