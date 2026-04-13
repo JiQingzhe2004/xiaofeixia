@@ -1,0 +1,114 @@
+name: Release Desktop App
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "发布标签，例如 v1.0.0"
+        required: true
+        type: string
+      ref:
+        description: "构建源码来源，默认 main"
+        required: false
+        default: "main"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            builder_args: --win nsis --publish never
+          - name: macOS
+            os: macos-14
+            builder_args: --mac dmg --publish never
+
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      CSC_FOR_PULL_REQUEST: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build renderer and electron main process
+        run: npm run build:app
+
+      - name: Package desktop app
+        run: npx electron-builder ${{ matrix.builder_args }}
+
+      - name: Upload packaged assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/latest*.yml
+            !release/builder-debug.yml
+            !release/builder-effective-config.yaml
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      RELEASE_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+
+    steps:
+      - name: Download packaged assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Show packaged files
+        shell: bash
+        run: ls -la release-assets
+
+      - name: Create or update GitHub Release
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists"
+          else
+            gh release create "$RELEASE_TAG" \
+              --title "小飞侠 $RELEASE_TAG" \
+              --target "$RELEASE_TARGET" \
+              --generate-notes
+          fi
+
+      - name: Upload release assets
+        shell: bash
+        run: gh release upload "$RELEASE_TAG" release-assets/* --clobber

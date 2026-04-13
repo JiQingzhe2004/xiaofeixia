@@ -2,6 +2,10 @@
   "name": "xiaofeixia",
   "version": "1.0.0",
   "description": "",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JiQingzhe2004/xiaofeixia.git"
+  },
   "license": "ISC",
   "author": "",
   "type": "commonjs",
@@ -29,6 +33,7 @@
       ]
     },
     "mac": {
+      "identity": null,
       "icon": "resources/icons/icon.icns",
       "target": [
         "dmg"
@@ -43,6 +48,14 @@
     "dmg": {
       "writeUpdateInfo": false
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "JiQingzhe2004",
+        "repo": "xiaofeixia",
+        "releaseType": "release"
+      }
+    ],
     "electronLanguages": [
       "zh-CN",
       "en-US"
