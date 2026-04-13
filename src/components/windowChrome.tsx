@@ -56,7 +56,7 @@ export function WindowDragRegion(props?: { title?: string }) {
           opacity: 0.95,
         }}
       >
-        {props?.title || "肥猪"}
+        {props?.title || "小飞侠"}
       </Typography>
     </Box>
   );

@@ -235,7 +235,7 @@ export default function SettingsPage({ onReauthorized }: Props) {
 
   const handleCopyAboutInfo = useCallback(async () => {
     const content = [
-      "肥猪",
+      "小飞侠",
       `版本：v${packageJson.version}`,
       `平台：${getPlatformLabel(window.appWindow?.platform)}`,
       `主题：${getThemeModeLabel(themeMode)}`,
@@ -677,7 +677,7 @@ export default function SettingsPage({ onReauthorized }: Props) {
                     <Box
                       component="img"
                       src={appIcon}
-                      alt="肥猪应用图标"
+                      alt="小飞侠应用图标"
                       sx={{
                         width: 68,
                         height: 68,
@@ -691,7 +691,7 @@ export default function SettingsPage({ onReauthorized }: Props) {
                     />
                     <Box sx={{ minWidth: 0, flex: 1 }}>
                       <Typography variant="h5" fontWeight={800} color="text.primary">
-                        肥猪
+                        小飞侠
                       </Typography>
                       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
                         一个正在成形的桌面客户端，当前已经具备初始化、授权、消息探索和外观配置能力。
@@ -772,7 +772,7 @@ export default function SettingsPage({ onReauthorized }: Props) {
                   </Typography>
                 </Stack>
                 <Typography variant="caption" color="text.secondary">
-                  数据库文件名：`feizhu.db`
+                  数据库文件名：`xiaofeixia.db`
                 </Typography>
               </Stack>
             </ListItem>

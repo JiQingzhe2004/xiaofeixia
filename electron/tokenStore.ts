@@ -4,10 +4,12 @@
  */
 
 import * as path from "node:path";
+import * as fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { app } from "electron";
 
-const DB_FILE = "feizhu.db";
+const DB_FILE = "xiaofeixia.db";
+const LEGACY_DB_FILES = ["feizhu.db"];
 
 export interface AppConfig {
   clientId: string;
@@ -42,13 +44,45 @@ export interface BotRecentChat {
 
 let db: DatabaseSync | null = null;
 
-function getDbPath(): string {
-  return path.join(app.getPath("userData"), DB_FILE);
+function getDbPath(fileName = DB_FILE): string {
+  return path.join(app.getPath("userData"), fileName);
+}
+
+function migrateLegacyDbFile(): void {
+  const currentDbPath = getDbPath();
+  if (fs.existsSync(currentDbPath)) {
+    return;
+  }
+
+  for (const legacyFile of LEGACY_DB_FILES) {
+    const legacyDbPath = getDbPath(legacyFile);
+    if (!fs.existsSync(legacyDbPath)) {
+      continue;
+    }
+
+    try {
+      fs.renameSync(legacyDbPath, currentDbPath);
+      return;
+    } catch (error) {
+      try {
+        fs.copyFileSync(legacyDbPath, currentDbPath, fs.constants.COPYFILE_EXCL);
+        return;
+      } catch (copyError) {
+        console.warn("[tokenStore] 迁移旧数据库文件失败", {
+          legacyDbPath,
+          currentDbPath,
+          error,
+          copyError,
+        });
+      }
+    }
+  }
 }
 
 function ensureDb(): DatabaseSync {
   if (db) return db;
 
+  migrateLegacyDbFile();
   db = new DatabaseSync(getDbPath());
   db.exec(`
     CREATE TABLE IF NOT EXISTS app_config (

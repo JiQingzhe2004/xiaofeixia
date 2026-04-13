@@ -2,7 +2,7 @@ import type { DragEvent } from "react";
 import { Box, Typography, Button, CircularProgress } from "@mui/material";
 import { Rocket } from "lucide-react";
 
-const LOGO_SRC = new URL("../../resources/icons/feizhu.png", import.meta.url).href;
+const LOGO_SRC = new URL("../../resources/icons/xiaofeixia.png", import.meta.url).href;
 
 interface Props {
   onNext: () => void;
@@ -47,11 +47,11 @@ export default function StepWelcome({ onNext, loading, onPigClick }: Props) {
             mb: 2,
           }}
         >
-          欢迎使用肥猪
+          欢迎使用小飞侠
         </Typography>
 
         <Typography sx={{ mb: 1.5, lineHeight: 1.75, color: "text.primary", opacity: 0.8 }}>
-          肥猪是一款飞书聊天记录导出工具。
+          小飞侠是一款飞书聊天记录导出工具。
         </Typography>
         <Typography sx={{ mb: 5, lineHeight: 1.75, color: "text.secondary", maxWidth: 520 }}>
           首次使用需要完成两个步骤：创建飞书应用，然后使用飞书账号登录。
@@ -120,7 +120,7 @@ export default function StepWelcome({ onNext, loading, onPigClick }: Props) {
           <Box
             component="img"
             src={LOGO_SRC}
-            alt="肥猪 Logo"
+            alt="小飞侠 Logo"
             draggable={false}
             onDragStart={(event: DragEvent<HTMLImageElement>) => event.preventDefault()}
             sx={{

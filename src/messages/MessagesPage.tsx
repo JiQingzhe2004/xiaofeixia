@@ -226,10 +226,10 @@ function mergeConversationSource(
 }
 
 function getConversationIdentity(conversation: MessageConversation) {
-  if (conversation.type === "p2p" && conversation.chatId && conversation.source !== "user") {
+  if (conversation.source === "bot") {
     return "bot";
   }
-  return conversation.source === "bot" ? "bot" : "user";
+  return "user";
 }
 
 function getConversationSourceMeta(conversation: MessageConversation) {
@@ -1095,7 +1095,7 @@ export default function MessagesPage() {
             size="small"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder={browseMode === "contacts" ? "搜索联系人" : "搜索群聊"}
+            placeholder={browseMode === "contacts" ? "搜索联系人" : "搜索会话"}
             sx={{ mt: 2 }}
             InputProps={{
               startAdornment: (

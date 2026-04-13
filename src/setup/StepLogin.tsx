@@ -40,7 +40,7 @@ export default function StepLogin({
       </Typography>
 
       <Typography sx={{ mb: 4, color: "text.secondary", maxWidth: 520, lineHeight: 1.7 }}>
-        继续完成账号授权，后续就可以正常使用肥猪。
+        继续完成账号授权，后续就可以正常使用小飞侠。
       </Typography>
 
       {!appResult && loading && (

@@ -21,8 +21,8 @@ import {
   Settings,
 } from "lucide-react";
 import { TITLEBAR_HEIGHT, WindowDragRegion } from "../components/windowChrome";
-import feizhuLogo from "../../resources/icons/feizhu.png";
-import feizhuIcon from "../../resources/icons/Avatar.png";
+import xiaofeixiaLogo from "../../resources/icons/xiaofeixia.png";
+import xiaofeixiaIcon from "../../resources/icons/Avatar.png";
 import packageJson from "../../package.json";
 import SettingsPage from "../settings/SettingsPage";
 
@@ -149,8 +149,8 @@ export default function MainPage({ userName, avatarUrl, onLogout, onReauthorized
             >
               <Box
                 component="img"
-                src={feizhuLogo}
-                alt="肥猪 logo"
+                src={xiaofeixiaLogo}
+                alt="小飞侠 logo"
                 sx={{
                   width: 44,
                   height: 44,
@@ -245,8 +245,8 @@ export default function MainPage({ userName, avatarUrl, onLogout, onReauthorized
               }}
             >
               <Avatar
-                src={avatarUrl || feizhuIcon}
-                alt={avatarUrl ? `${displayName} 的头像` : "肥猪头像回退图"}
+                src={avatarUrl || xiaofeixiaIcon}
+                alt={avatarUrl ? `${displayName} 的头像` : "小飞侠头像回退图"}
                 sx={{
                   width: 40,
                   height: 40,
@@ -400,8 +400,8 @@ export default function MainPage({ userName, avatarUrl, onLogout, onReauthorized
               >
                 <Box
                   component="img"
-                  src={feizhuLogo}
-                  alt="肥猪 logo"
+                  src={xiaofeixiaLogo}
+                  alt="小飞侠 logo"
                   sx={{
                     width: 200,
                     height: 200,
@@ -476,7 +476,7 @@ export default function MainPage({ userName, avatarUrl, onLogout, onReauthorized
                   >
                     {displayName}
                   </Box>
-                  小猪，准备好探险了吗？
+                  小飞侠，准备好探险了吗？
                 </Typography>
               </Box>
             )}

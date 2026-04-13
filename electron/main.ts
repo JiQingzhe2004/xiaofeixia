@@ -62,6 +62,19 @@ type UserProfileSummary = {
   title: string;
   avatarUrl?: string;
 };
+type RecentP2PConversationSnapshot = {
+  chatId: string;
+  userOpenId: string;
+  fallbackTitle?: string;
+  fallbackAvatarUrl?: string;
+  lastMessagePreview?: string;
+  lastMessageAt?: number;
+};
+type RecentP2PConversationCache = {
+  key: string;
+  items: ConversationListItem[];
+  expiresAt: number;
+};
 class FeishuApiError extends Error {
   code?: number;
   status?: number;
@@ -87,6 +100,12 @@ let realtimeConnectionStatus: RealtimeConnectionStatus = {
   message: "实时连接未启用",
   updatedAt: Date.now(),
 };
+let recentUserP2PChatCache: RecentP2PConversationCache | null = null;
+
+const RECENT_P2P_CHAT_PAGE_SIZE = 50;
+const RECENT_P2P_CHAT_MAX_PAGES = 4;
+const RECENT_P2P_CHAT_TARGET_COUNT = 24;
+const RECENT_P2P_CHAT_CACHE_TTL = 30 * 1000;
 
 function resolveBrand(brand: Brand = "feishu") {
   if (brand === "lark") {
@@ -153,6 +172,11 @@ function parseGrantedScopes(scopeValue?: string) {
       .map((item) => item.trim())
       .filter(Boolean)
   );
+}
+
+function hasScopes(grantedScopeValue: string | undefined, requiredScopes: string[]) {
+  const grantedScopes = parseGrantedScopes(grantedScopeValue);
+  return requiredScopes.every((scope) => grantedScopes.has(scope));
 }
 
 function ensureScopes(grantedScopeValue: string | undefined, requiredScopes: string[]) {
@@ -439,7 +463,7 @@ function normalizeChatConversation(
   >;
   const chatId = String(item.chat_id || "");
   const chatMode = String(item.chat_mode || item.chat_type || "");
-  const userOpenId = String(item.p2p_chatter_id || item.open_id || "");
+  const userOpenId = String(item.p2p_target_id || item.p2p_chatter_id || item.open_id || "");
   const type: ConversationListItem["type"] = chatMode.toLowerCase() === "p2p" ? "p2p" : "group";
   const title = String(item.name || item.chat_name || item.display_name || chatId || userOpenId);
   const description = String(item.description || item.chat_mode || "");
@@ -497,8 +521,8 @@ function normalizeChatSearchQuery(query: string) {
   return JSON.stringify(normalizedQuery);
 }
 
-function isGroupConversation(item: ConversationListItem) {
-  return item.type === "group" && !!item.chatId;
+function isChatListConversation(item: ConversationListItem) {
+  return item.type === "p2p" ? !!item.userOpenId : !!item.chatId;
 }
 
 function matchesConversationQuery(item: ConversationListItem, query: string) {
@@ -524,6 +548,31 @@ function mergeConversationSource(
   return "mixed";
 }
 
+function isLikelyUserOpenId(value?: string) {
+  return /^ou_[a-z0-9]+$/i.test(String(value || "").trim());
+}
+
+function pickConversationTitle(base: ConversationListItem, incoming: ConversationListItem) {
+  const baseTitle = String(base.title || "").trim();
+  const incomingTitle = String(incoming.title || "").trim();
+  const baseLooksLikeId =
+    !baseTitle ||
+    baseTitle === String(base.userOpenId || "").trim() ||
+    isLikelyUserOpenId(baseTitle);
+  const incomingLooksLikeId =
+    !incomingTitle ||
+    incomingTitle === String(incoming.userOpenId || "").trim() ||
+    isLikelyUserOpenId(incomingTitle);
+
+  if (baseLooksLikeId && incomingTitle && !incomingLooksLikeId) {
+    return incomingTitle;
+  }
+  if (incomingLooksLikeId && baseTitle) {
+    return baseTitle;
+  }
+  return baseTitle || incomingTitle;
+}
+
 function pickPrimaryConversation(base: ConversationListItem, incoming: ConversationListItem) {
   const baseWeight = base.source === "user" || base.source === "mixed" ? 2 : 1;
   const incomingWeight = incoming.source === "user" || incoming.source === "mixed" ? 2 : 1;
@@ -536,6 +585,7 @@ function mergeConversationItem(base: ConversationListItem, incoming: Conversatio
 
   return {
     ...primary,
+    title: pickConversationTitle(primary, secondary),
     subtitle: primary.subtitle || secondary.subtitle,
     avatarUrl: primary.avatarUrl || secondary.avatarUrl,
     chatId: primary.chatId || secondary.chatId,
@@ -650,6 +700,57 @@ async function fetchUserProfileByOpenId(userOpenId: string) {
   try {
     const { brand, accessToken } = getAuthContext();
     const data = await callOpenApiWithRefresh<{
+      users?: Array<Record<string, unknown>>;
+    }>({
+      brand,
+      accessToken,
+      method: "POST",
+      apiPath: "/open-apis/contact/v3/users/basic_batch",
+      query: {
+        user_id_type: "open_id",
+      },
+      body: {
+        user_ids: [userOpenId],
+      },
+    });
+
+    const user = data.users?.[0] || {};
+    const fallbackTitle = String(user.name || user.nickname || user.en_name || user.user_id || "");
+
+    try {
+      const detail = await callOpenApiWithRefresh<{
+        user?: Record<string, unknown>;
+      }>({
+        brand,
+        accessToken,
+        method: "GET",
+        apiPath: `/open-apis/contact/v3/users/${encodeURIComponent(userOpenId)}`,
+        query: {
+          user_id_type: "open_id",
+        },
+      });
+
+      const detailUser = detail.user || {};
+      return {
+        title: String(
+          detailUser.name ||
+            detailUser.nickname ||
+            detailUser.en_name ||
+            fallbackTitle ||
+            userOpenId
+        ),
+        avatarUrl: extractAvatarUrl(detailUser.avatar) || undefined,
+      };
+    } catch {
+      return {
+        title: fallbackTitle || userOpenId,
+        avatarUrl: undefined,
+      };
+    }
+  } catch {
+    try {
+      const { brand, accessToken } = getAuthContext();
+      const data = await callOpenApiWithRefresh<{
       user?: Record<string, unknown>;
     }>({
       brand,
@@ -666,29 +767,6 @@ async function fetchUserProfileByOpenId(userOpenId: string) {
       title: String(user.name || user.nickname || user.en_name || userOpenId),
       avatarUrl: extractAvatarUrl(user.avatar) || undefined,
     };
-  } catch {
-    try {
-      const { brand, accessToken } = getAuthContext();
-      const data = await callOpenApiWithRefresh<{
-        users?: Array<Record<string, unknown>>;
-      }>({
-        brand,
-        accessToken,
-        method: "POST",
-        apiPath: "/open-apis/contact/v3/users/basic_batch",
-        query: {
-          user_id_type: "open_id",
-        },
-        body: {
-          user_ids: [userOpenId],
-        },
-      });
-
-      const user = data.users?.[0] || {};
-      return {
-        title: String(user.name || user.nickname || user.en_name || user.user_id || userOpenId),
-        avatarUrl: extractAvatarUrl(user.avatar) || undefined,
-      };
     } catch {
       return {
         title: userOpenId,
@@ -938,6 +1016,295 @@ async function collectPagedItems(
   return items;
 }
 
+function chunkStrings(items: string[], chunkSize: number) {
+  if (!items.length || chunkSize <= 0) {
+    return [] as string[][];
+  }
+
+  const chunks: string[][] = [];
+  for (let start = 0; start < items.length; start += chunkSize) {
+    chunks.push(items.slice(start, start + chunkSize));
+  }
+  return chunks;
+}
+
+function extractMessageIdFromSearchItem(item: Record<string, unknown>) {
+  const metaData = item.meta_data;
+  if (!metaData || typeof metaData !== "object") {
+    return "";
+  }
+
+  return String((metaData as Record<string, unknown>).message_id || "");
+}
+
+async function callMessageMGet(params: {
+  brand: Brand;
+  accessToken: string;
+  messageIds: string[];
+}) {
+  const { brand, accessToken, messageIds } = params;
+  const { openBase } = resolveBrand(brand);
+  const url = new URL("/open-apis/im/v1/messages/mget", openBase);
+  url.searchParams.set("card_msg_content_type", "raw_card_content");
+  messageIds.forEach((messageId) => {
+    url.searchParams.append("message_ids", messageId);
+  });
+
+  const resp = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  const payload = await parseJsonResponse(resp);
+  const code = Number(payload.code ?? 0);
+  if (!resp.ok || code !== 0) {
+    throw new FeishuApiError(getApiErrorMessage(payload, resp.status, "飞书接口请求失败"), {
+      code: Number.isFinite(code) ? code : undefined,
+      status: resp.status,
+    });
+  }
+
+  return ((payload.data as Record<string, unknown>) || {}) as {
+    items?: Array<Record<string, unknown>>;
+  };
+}
+
+async function callMessageMGetWithRefresh(params: {
+  brand: Brand;
+  accessToken: string;
+  messageIds: string[];
+}) {
+  try {
+    return await callMessageMGet(params);
+  } catch (error) {
+    if (!(error instanceof FeishuApiError) || error.code !== 99991677) {
+      throw error;
+    }
+
+    const refreshedAccessToken = await refreshUserAccessToken();
+    return callMessageMGet({
+      ...params,
+      accessToken: refreshedAccessToken,
+    });
+  }
+}
+
+async function batchGetMessagesByIds(params: {
+  brand: Brand;
+  accessToken: string;
+  messageIds: string[];
+}) {
+  const items: Array<Record<string, unknown>> = [];
+  for (const batch of chunkStrings(params.messageIds, 50)) {
+    const data = await callMessageMGetWithRefresh({
+      ...params,
+      messageIds: batch,
+    });
+    items.push(...(data.items || []));
+  }
+  return items;
+}
+
+async function batchQueryChatContexts(params: {
+  brand: Brand;
+  accessToken: string;
+  chatIds: string[];
+}) {
+  const contexts = new Map<string, Record<string, unknown>>();
+  for (const batch of chunkStrings(params.chatIds, 50)) {
+    const data = await callOpenApiWithRefresh<{ items?: Array<Record<string, unknown>> }>({
+      brand: params.brand,
+      accessToken: params.accessToken,
+      method: "POST",
+      apiPath: "/open-apis/im/v1/chats/batch_query",
+      query: {
+        user_id_type: "open_id",
+      },
+      body: {
+        chat_ids: batch,
+      },
+    });
+
+    (data.items || []).forEach((item) => {
+      const chatId = String(item.chat_id || "");
+      if (!chatId) return;
+      contexts.set(chatId, item);
+    });
+  }
+  return contexts;
+}
+
+async function loadRecentUserP2PChats() {
+  const { brand, accessToken, scope, currentUserOpenId } = getAuthContext();
+  if (!hasScopes(scope, ["search:message"])) {
+    return [] as ConversationListItem[];
+  }
+
+  const cacheKey = `${brand}:${currentUserOpenId || "anonymous"}`;
+  if (
+    recentUserP2PChatCache?.key === cacheKey &&
+    recentUserP2PChatCache.expiresAt > Date.now()
+  ) {
+    return recentUserP2PChatCache.items;
+  }
+
+  const conversations = new Map<string, RecentP2PConversationSnapshot>();
+  let pageToken = "";
+  let page = 0;
+
+  while (page < RECENT_P2P_CHAT_MAX_PAGES && conversations.size < RECENT_P2P_CHAT_TARGET_COUNT) {
+    const data = await callOpenApiWithRefresh<{
+      items?: Array<Record<string, unknown>>;
+      has_more?: boolean;
+      page_token?: string;
+    }>({
+      brand,
+      accessToken,
+      method: "POST",
+      apiPath: "/open-apis/im/v1/messages/search",
+      query: {
+        page_size: RECENT_P2P_CHAT_PAGE_SIZE,
+        page_token: pageToken || undefined,
+      },
+      body: {
+        query: "",
+        filter: {
+          chat_type: "p2p",
+        },
+      },
+    });
+
+    const messageIds = Array.from(
+      new Set((data.items || []).map(extractMessageIdFromSearchItem).filter(Boolean))
+    );
+    if (!messageIds.length) {
+      pageToken = data.has_more && data.page_token ? String(data.page_token) : "";
+      if (!pageToken) {
+        break;
+      }
+      page += 1;
+      continue;
+    }
+
+    const messageItems = await batchGetMessagesByIds({
+      brand,
+      accessToken,
+      messageIds,
+    });
+    const chatIds = Array.from(
+      new Set(
+        messageItems
+          .map((item) => String(item.chat_id || ""))
+          .filter((chatId) => !!chatId && !conversations.has(chatId))
+      )
+    );
+    const chatContexts =
+      chatIds.length > 0
+        ? await batchQueryChatContexts({
+            brand,
+            accessToken,
+            chatIds,
+          })
+        : new Map<string, Record<string, unknown>>();
+
+    messageItems.forEach((item) => {
+      const chatId = String(item.chat_id || "");
+      if (!chatId || conversations.has(chatId)) {
+        return;
+      }
+
+      const chatContext = chatContexts.get(chatId);
+      if (String(chatContext?.chat_mode || "").toLowerCase() !== "p2p") {
+        return;
+      }
+
+      const userOpenId = String(
+        chatContext?.p2p_target_id || chatContext?.p2p_chatter_id || chatContext?.open_id || ""
+      );
+      if (!userOpenId || userOpenId === currentUserOpenId) {
+        return;
+      }
+
+      const body = ((item.body as Record<string, unknown> | undefined) || {}) as Record<
+        string,
+        unknown
+      >;
+      const messageType = String(item.msg_type || "");
+      const sender = ((item.sender as Record<string, unknown> | undefined) || {}) as Record<
+        string,
+        unknown
+      >;
+      const senderOpenId = getSenderOpenId(sender);
+      const senderName = String(
+        sender.name || sender.user_name || sender.display_name || sender.sender_name || ""
+      );
+      const senderAvatarUrl = extractAvatarUrl(sender.avatar) || undefined;
+      const contextTitle = String(
+        chatContext?.name || chatContext?.chat_name || chatContext?.display_name || ""
+      );
+      const contextAvatarUrl = extractAvatarUrl(chatContext?.avatar) || undefined;
+      conversations.set(chatId, {
+        chatId,
+        userOpenId,
+        fallbackTitle: contextTitle || (senderOpenId === userOpenId ? senderName : "") || userOpenId,
+        fallbackAvatarUrl:
+          contextAvatarUrl || (senderOpenId === userOpenId ? senderAvatarUrl : undefined),
+        lastMessagePreview: parseMessageContent(messageType, body.content) || "私聊会话",
+        lastMessageAt: parseRawTimestamp(String(item.create_time || "")) ?? Date.now(),
+      });
+    });
+
+    pageToken = data.has_more && data.page_token ? String(data.page_token) : "";
+    if (!pageToken) {
+      break;
+    }
+    page += 1;
+  }
+
+  const profileMap = new Map<string, UserProfileSummary>();
+  await Promise.all(
+    Array.from(new Set(Array.from(conversations.values()).map((item) => item.userOpenId))).map(
+      async (userOpenId) => {
+        profileMap.set(userOpenId, await getCachedUserProfileByOpenId(userOpenId));
+      }
+    )
+  );
+
+  const items = Array.from(conversations.values())
+    .sort((left, right) => (right.lastMessageAt || 0) - (left.lastMessageAt || 0))
+    .map((item) => {
+      const profile = profileMap.get(item.userOpenId);
+      return {
+        id: `user:${item.userOpenId}`,
+        type: "p2p" as const,
+        title: profile?.title || item.fallbackTitle || item.userOpenId,
+        subtitle: item.lastMessagePreview || "私聊会话",
+        avatarUrl: profile?.avatarUrl || item.fallbackAvatarUrl,
+        chatId: item.chatId,
+        userOpenId: item.userOpenId,
+        source: "user" as const,
+      };
+    });
+
+  recentUserP2PChatCache = {
+    key: cacheKey,
+    items,
+    expiresAt: Date.now() + RECENT_P2P_CHAT_CACHE_TTL,
+  };
+  return items;
+}
+
+async function loadOptionalRecentUserP2PChats(query?: string) {
+  try {
+    const items = await loadRecentUserP2PChats();
+    return query ? items.filter((item) => matchesConversationQuery(item, query)) : items;
+  } catch (error) {
+    console.warn("[Messages] 加载用户 P2P 会话失败", error);
+    return [] as ConversationListItem[];
+  }
+}
+
 async function loadUserChatList(brand: Brand, accessToken: string) {
   return collectPagedItems((pageToken) =>
     callOpenApiWithRefresh<{
@@ -1086,11 +1453,21 @@ async function listContacts(): Promise<ConversationListResult> {
 async function searchChats(query: string): Promise<ConversationListResult> {
   const { brand, accessToken, scope, clientId, clientSecret } = getAuthContext();
   ensureScopes(scope, ["im:chat:read"]);
-  const [userItems, botItems] = await Promise.all([
+  const [userItems, botItems, recentUserP2PItems] = await Promise.all([
     searchUserChats(brand, accessToken, query),
     searchBotChats(brand, clientId, clientSecret, query),
+    loadOptionalRecentUserP2PChats(query),
   ]);
-  const items = mergeConversationLists([...userItems, ...botItems]).filter(isGroupConversation);
+  const botRecentItems = tokenStore
+    .getBotRecentChats()
+    .map(normalizeBotRecentChat)
+    .filter((item) => matchesConversationQuery(item, query));
+  const items = mergeConversationLists([
+    ...userItems,
+    ...botItems,
+    ...recentUserP2PItems,
+    ...botRecentItems,
+  ]).filter(isChatListConversation);
 
   return { items };
 }
@@ -1098,16 +1475,20 @@ async function searchChats(query: string): Promise<ConversationListResult> {
 async function listChats(): Promise<ConversationListResult> {
   const { brand, accessToken, scope, clientId, clientSecret } = getAuthContext();
   ensureScopes(scope, ["im:chat:read"]);
-  const [userChats, botChats] = await Promise.all([
+  const [userChats, botChats, recentUserP2PItems] = await Promise.all([
     loadUserChatList(brand, accessToken),
     loadBotChatList(brand, clientId, clientSecret),
+    loadOptionalRecentUserP2PChats(),
   ]);
+  const botRecentItems = tokenStore.getBotRecentChats().map(normalizeBotRecentChat);
 
   return {
     items: mergeConversationLists([
       ...userChats.map((item) => normalizeChatConversation(item, "user")),
       ...botChats.map((item) => normalizeChatConversation(item, "bot")),
-    ]).filter(isGroupConversation),
+      ...recentUserP2PItems,
+      ...botRecentItems,
+    ]).filter(isChatListConversation),
   };
 }
 
@@ -1314,7 +1695,7 @@ function createWindow() {
   const win = new BrowserWindow({
     width: 1100,
     height: 750,
-    title: "肥猪",
+    title: "小飞侠",
     ...getSharedWindowChromeOptions(),
     webPreferences: {
       preload: preloadPath,
