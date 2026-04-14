@@ -433,6 +433,9 @@ export default function SettingsPage({ onReauthorized }: Props) {
                 <Typography variant="body2" color="text.secondary">
                   当消息页权限不足，或需要补齐联系人能力时，从这里重新申请用户授权。
                 </Typography>
+                <Alert severity="warning" sx={{ mt: 1.5, borderRadius: 2 }}>
+                  重新申请授权后，飞书会向企业系统管理员发送提醒。只有管理员在飞书后台审批或放行后，新增权限才会真正生效；如果仍提示权限不足，通常需要先确认后台是否已经通过。
+                </Alert>
               </Box>
               <Stack direction={{ xs: "column", sm: "row" }} spacing={1.25} sx={{ width: { xs: "100%", sm: "auto" } }}>
                 <Button

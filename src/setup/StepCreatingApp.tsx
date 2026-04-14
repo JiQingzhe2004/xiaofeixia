@@ -65,6 +65,13 @@ export default function StepCreatingApp({
           : "先打开授权页面，再在浏览器中完成授权。"}
       </Typography>
 
+      <Alert
+        severity="warning"
+        sx={{ mb: 3, width: "100%", maxWidth: 640, borderRadius: 2, textAlign: "left" }}
+      >
+        这一步提交后，飞书会向你所在企业的系统管理员发送应用接入或权限开通提醒。只有管理员在飞书后台完成审批或放行后，相关能力才会生效；如果暂时无法使用，通常不是软件异常，而是后台审批还未通过。
+      </Alert>
+
       {!data && loading && !polling && (
         <Box
           sx={{

@@ -132,6 +132,7 @@ let recentUserP2PChatCache: RecentP2PConversationCache | null = null;
 let userP2PChatListCache: RecentP2PConversationCache | null = null;
 let silentUserSearchCache: RecentP2PConversationCache | null = null;
 let silentChatSearchCache: RecentP2PConversationCache | null = null;
+let refreshUserAccessTokenPending: Promise<string> | null = null;
 let silentUserSearchPending:
   | {
       key: string;
@@ -359,7 +360,7 @@ async function getCurrentBotProfile(params: {
   return profilePromise;
 }
 
-async function refreshUserAccessToken() {
+async function performRefreshUserAccessToken() {
   const authContext = getAuthContext();
   if (!authContext.refreshToken) {
     throw new Error("登录态已过期，请重新登录。");
@@ -408,6 +409,18 @@ async function refreshUserAccessToken() {
   });
 
   return accessToken;
+}
+
+async function refreshUserAccessToken() {
+  if (refreshUserAccessTokenPending) {
+    return refreshUserAccessTokenPending;
+  }
+
+  refreshUserAccessTokenPending = performRefreshUserAccessToken().finally(() => {
+    refreshUserAccessTokenPending = null;
+  });
+
+  return refreshUserAccessTokenPending;
 }
 
 async function callOpenApiWithRefresh<T = Record<string, unknown>>(params: {

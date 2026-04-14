@@ -132,6 +132,13 @@ export default function StepLogin({
         点击下方按钮，浏览器将打开飞书登录页面，并一并申请消息、联系人相关授权。机器人会话能力仍取决于应用后台权限与事件订阅配置。
       </Typography>
 
+      <Alert
+        severity="warning"
+        sx={{ mb: 4, width: "100%", maxWidth: 520, borderRadius: 2, textAlign: "left" }}
+      >
+        授权申请提交后，飞书会通知企业系统管理员处理。消息、联系人等能力需要管理员在飞书后台审批通过后才能正常使用；若授权后仍提示权限不足，请优先检查后台审批状态，而不是重复操作。
+      </Alert>
+
       {!loginStarted && !loading && (
         <Box
           sx={{
